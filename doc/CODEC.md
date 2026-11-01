@@ -155,7 +155,10 @@ the logistic domain, then an APM keyed by the decision and the activity
 (1/4 input, 3/4 APM).
 
 **1-bit images.** Their own model: three templates of 10, 16 and 22
-neighbouring pixels, a mixer selected by the 5 nearest.
+neighbouring pixels and one of the pixels three and four rows up, two
+match models (the last place a 26-pixel neighbourhood, and a 16-pixel one,
+was seen: the pixel there is expected, and the next ones along its row
+while they keep being right), a mixer selected by the 5 nearest pixels.
 
 **Indices.** One channel of 2 to 8 bits may be intensities or symbols
 (palette indices, a drawing of a few gray levels). The encoder codes it
@@ -380,6 +383,24 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: 1-bit images: matches and rows further up
+
+A set of 33 1-bit files of the corpus (PBM, WBMP, Sun, fonts, screen
+dumps, fax-like TIFF and PICT), 3.6 MB:
+
+| | size |
+|---|---|
+| before | 526,625 |
+| a match from a 26-pixel neighbourhood (its state selecting weights) | 519,840 |
+| the same, without the selection | 518,988 |
+| two matches (26 and 16 pixels) | 517,480 |
+| and a template of the rows 3 and 4 above | 502,817 |
+| and the 26 pixels as a context too | 502,782 (not kept) |
+
+screen.xwd 9,359 -> 5,361; FONTS.PCX 15,542 -> 13,629; abydos.pbm
+(dithered) 17,873 -> 15,892. The image stream stays version 4: nothing has
+been released, and the version is frozen at the first release.
 
 ### 01/11/2026: PICT
 

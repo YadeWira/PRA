@@ -245,6 +245,7 @@ type
       last samples predicts this sample's residual to be }
     useMatch: Boolean;            { inputs to the mixer for them }
     mTree: Boolean;               { the value is coded whole, by a tree of kbits (CodeIndices) }
+    mDirect: Boolean;             { one bit a pixel: the expectation is the bit (CodeBits) }
     kbits: Integer;
     { two: after the last MATCH_LEN[0] samples, and after the last MATCH_LEN[1] }
     mOn, mOk: array[0..1] of Boolean;   { an expectation for this sample; its bits still met }
@@ -270,7 +271,8 @@ begin
     for z := 0 to 1 do begin
       { the bit a match expects at this node: on the length tree's path to
         its length, then its mantissa and its sign while every bit met it }
-      if mOn[z] then
+      if mOn[z] and mDirect then e[z] := mK[z]
+      else if mOn[z] then
         if mTree or (node < 64) then begin
           dep := BitLen(node) - 1;
           if ((mK[z] or (1 shl kbits)) shr (kbits - dep)) = node then e[z] := (mK[z] shr (kbits - 1 - dep)) and 1;
@@ -768,10 +770,16 @@ end;
 { ---------- 1-bit images ---------- }
 
 procedure CodeBits(var pc: TPixelCoder; var d: TBytes; const L: TRasterLayout);
+const
+  BITS_TAB = 20;
 var
   rows: array[0..2] of array of Byte;
   cur, up, up2, w, x, b, t1, t2, i, y: Integer;
   o: Int64;
+  { the match: every pixel so far; where a large neighbourhood was last
+    seen; the pixel there, which may come again, and the next ones }
+  img: array of Byte; tab: array[0..1] of array of Integer; pos, k, z: Integer; big, far: Cardinal;
+  mPtr, mLen: array[0..1] of Integer;
 
   function Px(r, xx: Integer): Integer; inline;
   begin
@@ -782,7 +790,11 @@ begin
   { every bit of the row, the padding bits too }
   w := Integer(L.rowBytes) * 8;
   for i := 0 to 2 do begin rows[i] := nil; SetLength(rows[i], w); end;
-  pc.nm := 3;
+  pc.nm := 4;
+  img := nil; SetLength(img, Int64(w) * L.height);
+  for z := 0 to 1 do begin tab[z] := nil; SetLength(tab[z], 1 shl BITS_TAB); mPtr[z] := -1; mLen[z] := 0; end;
+  pos := 0;
+  pc.useMatch := True; pc.mDirect := True;
   for y := 0 to Integer(L.height) - 1 do begin
     cur := y mod 3; up := (y + 2) mod 3; up2 := (y + 1) mod 3;
     if y = 0 then begin FillChar(rows[up][0], w, 0); FillChar(rows[up2][0], w, 0); end
@@ -800,9 +812,40 @@ begin
       pc.hm[1] := Hash2(12, t2);
       pc.hm[2] := Hash4(13, t2, (Px(up2, x - 2) or (Px(up2, x + 2) shl 1) or (Px(cur, x - 7) shl 2)
          or (Px(cur, x - 8) shl 3) or (Px(up, x - 4) shl 4) or (Px(up, x + 4) shl 5)), 0);
+      { rows further up, from the image kept for the matches }
+      far := 0;
+      if y >= 4 then
+        for k := -2 to 2 do
+          if (x + k >= 0) and (x + k < w) then
+            far := far or (img[pos - 3 * w + k] shl (k + 2)) or (img[pos - 4 * w + k] shl (k + 7));
+      pc.hm[3] := Hash3(16, t1, far);
+      { the match: found again from a large neighbourhood when there is none }
+      big := Cardinal(t2) or (Cardinal(Px(cur, x - 7) or (Px(cur, x - 8) shl 1) or (Px(cur, x - 9) shl 2)
+         or (Px(cur, x - 10) shl 3) or (Px(up, x - 4) shl 4) or (Px(up, x + 4) shl 5) or (Px(up, x - 5) shl 6)
+         or (Px(up, x + 5) shl 7) or (Px(up2, x - 2) shl 8) or (Px(up2, x + 2) shl 9)) shl 16);
+      { two: from the large neighbourhood, and from the 16 nearest pixels }
+      for z := 0 to 1 do begin
+        if z = 0 then k := Integer((Hash2(14, big) shr 8) and ((1 shl BITS_TAB) - 1))
+        else k := Integer((Hash2(15, Cardinal(t2)) shr 8) and ((1 shl BITS_TAB) - 1));
+        if (mPtr[z] < 0) and (tab[z][k] > 0) then begin mPtr[z] := tab[z][k] - 1; mLen[z] := 0; end;
+        tab[z][k] := pos + 1;
+        pc.mOn[z] := mPtr[z] >= 0;
+        if pc.mOn[z] then begin
+          pc.mK[z] := img[mPtr[z]];
+          if mLen[z] < 16 then pc.mLq[z] := mLen[z] else pc.mLq[z] := Cap(12 + BitLen(mLen[z]), 31);
+        end;
+      end;
       pc.sel := 0;
       b := pc.Code(rows[cur][x], 0, t1 and 31);
       rows[cur][x] := b;
+      img[pos] := b;
+      for z := 0 to 1 do
+        if mPtr[z] >= 0 then begin
+          { kept while it is right, and inside its row }
+          if (img[mPtr[z]] = b) and ((mPtr[z] + 1) mod w <> 0) then begin Inc(mPtr[z]); Inc(mLen[z]); end
+          else begin mPtr[z] := -1; mLen[z] := 0; end;
+        end;
+      Inc(pos);
     end;
     if not pc.encoding then
       for x := 0 to Integer(L.rowBytes) - 1 do begin
@@ -811,6 +854,7 @@ begin
         d[o + x] := b;
       end;
   end;
+  pc.useMatch := False; pc.mDirect := False;
 end;
 
 { ---------- the pixels ---------- }
@@ -825,10 +869,10 @@ begin
   if bits < TABLE_BITS_MIN then bits := TABLE_BITS_MIN;
   pc.t.Init(bits);
   pc.sel := 0; pc.sel2 := -1; pc.apmCtx := 0;
-  pc.useMatch := False; pc.mTree := False;
+  pc.useMatch := False; pc.mTree := False; pc.mDirect := False;
   for i := 0 to 1 do begin pc.mOn[i] := False; pc.mOk[i] := False; end;
   for i := 0 to 63 do begin CounterInit(pc.mc[0, i]); CounterInit(pc.mc[1, i]); end;
-  if L.bits = 1 then pc.mx.Init(4, 32, MIXER_RATE)
+  if L.bits = 1 then pc.mx.Init(7, 32, MIXER_RATE)
   else begin
     pc.mx.Init(N_MODELS + 3, N_CLASSES * MAX_SUB_SEL * 4, MIXER_RATE);
     pc.mx2.Init(N_MODELS + 3, N_CLASSES * N_SEL2, MIXER_RATE);
