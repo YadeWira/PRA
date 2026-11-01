@@ -1,0 +1,16 @@
+PRA
+Copyright (c) 2026 Yade Bravo (YadeWira)
+Licensed under the MIT License (see LICENSE).
+
+Code shared with PJA
+--------------------
+
+pas/praarith.pas (binary arithmetic coder), pas/prablake3.pas (BLAKE3) and
+pas/collisions.py come from PJA (github.com/YadeWira/PJA, MIT, same author).
+BLAKE3 follows its specification (github.com/BLAKE3-team/BLAKE3-specs).
+
+packPNM
+-------
+
+PRA is the spiritual successor of packPNM by Matthias Stirner (LGPLv3). It
+takes ideas from it, not code.
