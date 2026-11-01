@@ -165,6 +165,39 @@ begin
     Check(ok, Format('%s: %d -> %d, back, same stream twice', [names[i], Length(samples[i]), Length(s)]));
   end;
 
+  Writeln('bands');
+  { the encoder's bands made small (BandBytes), so that these images come
+    in many: the same round trip, and the same stream whatever the threads }
+  BandBytes := 300;
+  bad := 0; n := 0;
+  for i := 0 to High(samples) do begin
+    if not EncodeFile(samples[i], s, why, 1) then Continue;
+    Inc(n);
+    ok := EncodeFile(samples[i], s2, why, 4) and Same(s, s2);
+    ok := ok and (DecodeFile(s, Length(samples[i]), back, 1) = dsOk) and Same(back, samples[i]);
+    ok := ok and (DecodeFile(s, Length(samples[i]), back, 3) = dsOk) and Same(back, samples[i]);
+    if not ok then Inc(bad);
+    all.Update(s[0], Length(s));
+  end;
+  Check((bad = 0) and (n >= 15), Format('%d images in bands of 300 B: back, the same with 1 and 4 threads', [n]));
+  bad := 0; raised := 0;
+  streams := nil; SetLength(streams, Length(samples));
+  for i := 0 to High(samples) do EncodeFile(samples[i], streams[i], why, 2);
+  for i := 1 to 1000 do begin
+    s := streams[i mod Length(samples)];
+    if Length(s) = 0 then Continue;
+    dmg := Copy(s, 0, Length(s));
+    for k := 1 to 1 + Integer(Rand mod 3) do dmg[Integer(Rand mod Cardinal(Length(dmg)))] := Byte(Rand);
+    try
+      n := Length(samples[i mod Length(samples)]) * 2;
+      if (DecodeFile(dmg, n, back, 3) = dsOk) and (Length(back) > n) then Inc(bad);
+    except
+      Inc(raised);
+    end;
+  end;
+  Check((bad = 0) and (raised = 0), Format('1000 damaged streams in bands: no exception (%d), nothing over the cap (%d)', [raised, bad]));
+  BandBytes := 1 shl 21;
+
   Writeln('refused');
   Check(not EncodeFile(Bytes('P1'#10'2 2'#10'0 1 1 0'#10), s, why) and (why = 'unsupported variant'), 'plain PBM: ' + why);
   Check(not EncodeFile(Bytes('just some text'), s, why), 'text: ' + why);

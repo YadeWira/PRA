@@ -11,7 +11,7 @@ pra list FILE...            what each .pra holds: original size, stored size, ha
 | `-o PATH` | output name with one input; a directory if it exists or ends in `/` |
 | `--output-dir=DIR` | output directory, and nothing else |
 | `-f`, `--force` | replace an existing output, only with something that verified |
-| `-th N`, `--threads=N` | files at once; by default the processors, up to 8. Each file's lines still come out in the order of the inputs |
+| `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's bands (an image is cut into bands of about 2 MiB). The `.pra` is the same whatever the threads. Each file's lines still come out in the order of the inputs |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `--keep-corrupt` | `x`: an output that does not verify stays as `NAME.corrupt` |
 | `-n`, `--dry-run` | do everything but write |

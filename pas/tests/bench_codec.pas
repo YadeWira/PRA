@@ -19,7 +19,7 @@ begin
   for i := 1 to ParamCount do begin
     d := ReadFile(ParamStr(i));
     t0 := Now;
-    ok := EncodeFile(d, s, why);
+    ok := EncodeFile(d, s, why, StrToIntDef(GetEnvironmentVariable('PRA_TH'), 1));
     ms := MilliSecondsBetween(Now, t0);
     Inc(tin, Length(d));
     if ok then begin

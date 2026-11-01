@@ -38,14 +38,24 @@ const
   STREAM_VERSION = 1;
   PRA_VERSION = '0.1.0';
 
+var
+  { A band is coded on its own, with fresh models, so bands are coded and
+    decoded at once on as many threads. The encoder makes each at least
+    this many bytes of pixels: 2 MiB loses 0.04% against one band on the
+    tuning set, 1 MiB 0.17% (doc/CODEC.md). The stream records how many
+    there are: the decoder never looks at this. The tests lower it, to code
+    small images in many bands. }
+  BandBytes: Int64 = 1 shl 21;
+
 type
   TDecodeStatus = (dsOk, dsEmpty, dsFutureVersion, dsBadStream, dsTooBig);
 
 { The stream of d, verified; False if no parser takes d or it did not come
   back (then `why` says why). }
-function EncodeFile(const d: TBytes; out s: TBytes; out why: string): Boolean;
-{ The file of s, at most maxOut bytes. }
-function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes): TDecodeStatus;
+function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: Integer = 1): Boolean;
+{ The file of s, at most maxOut bytes. threads: how many bands at once;
+  the stream is the same whatever it is. }
+function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer = 1): TDecodeStatus;
 function DecodeStatusName(st: TDecodeStatus): string;
 
 { for the tests and tools: the parser that took the file }
@@ -122,6 +132,10 @@ begin
 end;
 
 { ---------- the pixel model ---------- }
+
+const
+  { at most this many bands (BandBytes says how large the encoder makes them) }
+  MAX_BANDS = 256;
 
 const
   N_MODELS = 10;
@@ -703,13 +717,16 @@ type
     mode: Integer;                 { one channel of 2-8 bits: samples or indices }
     hdrFirst, tailSrc, pixFirst: SizeInt;
     tailLen: Int64;
+    bands: Integer;
+    bandFirst, bandLen: array of SizeInt;  { where each band's bytes are in the stream }
   end;
 
 function ReadStream(const s: TBytes; maxOut: Int64; out h: TStreamHead): TDecodeStatus;
 var
-  src: TSource; hdrLen, run, y: Int64; flags, f, ver, m, k: Integer;
+  src: TSource; hdrLen, run, y, rest: Int64; flags, f, ver, m, k: Integer; Lp: TRasterLayout;
 begin
   h.modes := nil; h.mode := MODE_SAMPLES; h.L.Clear;
+  h.bands := 0; h.bandFirst := nil; h.bandLen := nil;
   h.hdrFirst := 0; h.tailSrc := 0; h.pixFirst := 0; h.tailLen := 0;
   if Length(s) = 0 then Exit(dsEmpty);
   src.b := s; src.p := 0; src.ok := True;
@@ -767,7 +784,22 @@ begin
     h.mode := src.Get;
     if not src.ok or (h.mode > MODE_INDICES) then Exit(dsBadStream);
   end;
+  { the bands: how many, and how long each one but the last is }
+  if h.L.format = rfHDR then Lp := RgbeLayout(h.L) else Lp := h.L;
+  h.bands := src.GetVarint(MAX_BANDS);
+  if not src.ok or (h.bands < 1) or (h.bands > Lp.height) then Exit(dsBadStream);
+  SetLength(h.bandFirst, h.bands); SetLength(h.bandLen, h.bands);
+  for k := 0 to h.bands - 2 do h.bandLen[k] := src.GetVarint(High(Int64) shr 1);
+  if not src.ok then Exit(dsBadStream);
   h.pixFirst := src.p;
+  rest := Length(s) - src.p;
+  for k := 0 to h.bands - 2 do begin
+    if h.bandLen[k] > rest then Exit(dsBadStream);
+    h.bandFirst[k] := Length(s) - rest;
+    Dec(rest, h.bandLen[k]);
+  end;
+  h.bandFirst[h.bands - 1] := Length(s) - rest;
+  h.bandLen[h.bands - 1] := rest;
   Result := dsOk;
 end;
 
@@ -825,6 +857,134 @@ begin
   Result := pc.enc.Finish;
 end;
 
+{ ---------- bands ---------- }
+
+{ how many bands the encoder makes of an image (the stream records it) }
+function BandCount(const Lp: TRasterLayout): Integer;
+var n: Int64;
+begin
+  n := (Lp.rowBytes * Lp.height) div BandBytes;
+  if n > MAX_BANDS then n := MAX_BANDS;
+  if n > Lp.height then n := Lp.height;
+  if n < 1 then n := 1;
+  Result := n;
+end;
+
+{ band b of n: its rows, [first, first + rows) }
+procedure BandRows(const Lp: TRasterLayout; n, b: Integer; out first, rows: Int64);
+var per: Int64;
+begin
+  per := (Lp.height + n - 1) div n;
+  first := per * b;
+  rows := Lp.height - first;
+  if rows > per then rows := per;
+  if rows < 0 then rows := 0;
+end;
+
+{ the layout of a band: the same rows, from its own first one }
+function BandLayout(const Lp: TRasterLayout; n, b: Integer): TRasterLayout;
+var first, rows: Int64;
+begin
+  BandRows(Lp, n, b, first, rows);
+  Result := Lp;
+  Result.dataOffset := Lp.dataOffset + first * Lp.rowBytes;
+  Result.height := rows;
+  Result.dataLength := rows * Lp.rowBytes;
+end;
+
+{ n jobs over `threads` threads (this one included): each takes the next
+  job until none is left. A job catches its own exceptions. }
+type
+  TJobProc = procedure(ctx: Pointer; k: Integer);
+  TJobPool = record
+    proc: TJobProc;
+    ctx: Pointer;
+    count: Integer;
+    next: LongInt;
+  end;
+  PJobPool = ^TJobPool;
+
+function PoolWorker(p: Pointer): PtrInt;
+var pool: PJobPool; k: LongInt;
+begin
+  pool := p;
+  repeat
+    k := InterlockedIncrement(pool^.next) - 1;
+    if k >= pool^.count then Break;
+    pool^.proc(pool^.ctx, k);
+  until False;
+  Result := 0;
+end;
+
+procedure RunJobs(count, threads: Integer; proc: TJobProc; ctx: Pointer);
+var pool: TJobPool; ids: array of TThreadID; i: Integer;
+begin
+  pool.proc := proc; pool.ctx := ctx; pool.count := count; pool.next := 0;
+  if threads > count then threads := count;
+  ids := nil; SetLength(ids, threads - 1);
+  for i := 0 to High(ids) do ids[i] := BeginThread(@PoolWorker, @pool);
+  PoolWorker(@pool);
+  for i := 0 to High(ids) do begin WaitForThreadTerminate(ids[i], 0); CloseThread(ids[i]); end;
+end;
+
+{ encoding: each band coded, and decoded beside it by its own verifier }
+type
+  TEncodeBands = record
+    px, back: TBytes;
+    Lp: TRasterLayout;
+    mode, n: Integer;
+    outs: array of TBytes;
+    failed: array of Boolean;
+  end;
+  PEncodeBands = ^TEncodeBands;
+
+procedure EncodeBandJob(ctx: Pointer; k: Integer);
+var e: PEncodeBands; Lb: TRasterLayout; live: TLiveStream; v: TVerifier; tid: TThreadID; ok: Boolean;
+begin
+  e := ctx;
+  e^.failed[k] := True;
+  Lb := BandLayout(e^.Lp, e^.n, k);
+  live := TLiveStream.Create;
+  v.live := live; v.L := Lb; v.mode := e^.mode; v.back := e^.back; v.failed := True;
+  tid := BeginThread(@VerifierRun, @v);
+  ok := True;
+  try
+    { on an exception EncodePixelsLive finishes the stream: the verifier ends }
+    e^.outs[k] := EncodePixelsLive(e^.px, Lb, e^.mode, live);
+  except
+    ok := False;
+  end;
+  WaitForThreadTerminate(tid, 0);
+  CloseThread(tid);
+  live.Free;
+  e^.failed[k] := not ok or v.failed;
+end;
+
+{ decoding: each band from its own copy of its bytes, so that what the
+  arithmetic decoder reads past a band's end is zeros, as it was for the
+  verifier }
+type
+  TDecodeBands = record
+    bytes: array of TBytes;
+    out_: TBytes;
+    Lp: TRasterLayout;
+    mode, n: Integer;
+    failed: array of Boolean;
+  end;
+  PDecodeBands = ^TDecodeBands;
+
+procedure DecodeBandJob(ctx: Pointer; k: Integer);
+var e: PDecodeBands;
+begin
+  e := ctx;
+  e^.failed[k] := True;
+  try
+    DecodePixels(e^.bytes[k], 0, e^.out_, BandLayout(e^.Lp, e^.n, k), e^.mode);
+    e^.failed[k] := False;
+  except
+  end;
+end;
+
 { ---------- the stream ---------- }
 
 function SameBytes(const a: TBytes; aFirst: SizeInt; const b: TBytes; bFirst, len: SizeInt): Boolean;
@@ -833,11 +993,11 @@ begin
   Result := (len = 0) or CompareMem(@a[aFirst], @b[bFirst], len);
 end;
 
-function EncodeFile(const d: TBytes; out s: TBytes; out why: string): Boolean;
+function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: Integer): Boolean;
 var
   L, Lp, Lt: TRasterLayout; st: TParseStatus; o: TSink; tailFirst, used, trialRows: Int64; flags: Byte;
-  px, alt, rgbe, modes, prefix, lines, back: TBytes; y, run, m: Integer; v: TVerifier; live: TLiveStream;
-  h: TStreamHead; ok: Boolean; tid: TThreadID;
+  px, rgbe, modes, prefix, lines, back: TBytes; y, run, m, k: Integer; at: SizeInt;
+  h: TStreamHead; ok: Boolean; eb: TEncodeBands;
 begin
   s := nil; why := '';
   st := ParseAny(d, L);
@@ -877,7 +1037,6 @@ begin
   m := MODE_SAMPLES;
   if L.format = rfHDR then begin Lp := RgbeLayout(L); px := rgbe; end
   else begin Lp := L; px := d; end;
-  alt := nil;
   if HasMode(L) then begin
     { both ways, and the smaller one: on the whole image when it is small,
       on its first rows (at least TRIAL_SAMPLES) otherwise. Only the
@@ -888,25 +1047,23 @@ begin
     if Length(EncodePixels(d, Lt, MODE_INDICES)) < Length(EncodePixels(d, Lt, MODE_SAMPLES)) then m := MODE_INDICES;
     o.Put(m);
   end;
+  { the bands }
+  eb.px := px; eb.Lp := Lp; eb.mode := m;
+  eb.n := BandCount(Lp);
+  o.PutVarint(eb.n);
+  { the pixels, and their check beside them: each band decoded by a second
+    thread as its bytes come out, into one buffer (the bands are rows apart) }
+  eb.back := nil; SetLength(eb.back, Length(px));
+  eb.outs := nil; SetLength(eb.outs, eb.n);
+  eb.failed := nil; SetLength(eb.failed, eb.n);
+  RunJobs(eb.n, threads, @EncodeBandJob, @eb);
+  ok := True;
+  for k := 0 to eb.n - 1 do if eb.failed[k] then ok := False;
+  back := eb.back;
+  { the bands' lengths, all but the last }
+  if ok then
+    for k := 0 to eb.n - 2 do o.PutVarint(Length(eb.outs[k]));
   prefix := o.Done;
-  { the pixels, and their check beside them: a second thread decodes the
-    coder's bytes as they come out }
-  back := nil; SetLength(back, Length(px));
-  live := TLiveStream.Create;
-  try
-    v.live := live; v.L := Lp; v.mode := m; v.back := back; v.failed := True;
-    tid := BeginThread(@VerifierRun, @v);
-    try
-      alt := EncodePixelsLive(px, Lp, m, live);
-    finally
-      WaitForThreadTerminate(tid, 0);
-      CloseThread(tid);
-    end;
-    ok := not v.failed;
-    back := v.back;
-  finally
-    live.Free;
-  end;
   { the one guarantee: it has to come back. The pixels first ... }
   if ok then
     if L.format = rfHDR then begin
@@ -917,9 +1074,13 @@ begin
   { ... then everything else, read back from the stream as the decoder reads it }
   if ok then begin
     s := prefix;
-    SetLength(s, Length(prefix) + Length(alt));
-    if Length(alt) > 0 then Move(alt[0], s[Length(prefix)], Length(alt));
+    for k := 0 to eb.n - 1 do begin
+      at := Length(s);
+      SetLength(s, at + Length(eb.outs[k]));
+      if Length(eb.outs[k]) > 0 then Move(eb.outs[k][0], s[at], Length(eb.outs[k]));
+    end;
     ok := (ReadStream(s, Length(d), h) = dsOk) and (h.pixFirst = Length(prefix)) and (h.mode = m)
+      and (h.bands = eb.n)
       and (h.L.format = L.format) and (h.L.width = L.width) and (h.L.height = L.height)
       and (h.L.channels = L.channels) and (h.L.bits = L.bits) and (h.L.bigEndian = L.bigEndian)
       and (h.L.isFloat = L.isFloat) and (h.L.dataOffset = L.dataOffset) and (h.L.dataLength = L.dataLength)
@@ -932,8 +1093,8 @@ begin
   Result := True;
 end;
 
-function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes): TDecodeStatus;
-var h: TStreamHead; rgbe, lines: TBytes; tailFirst: Int64;
+function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer): TDecodeStatus;
+var h: TStreamHead; rgbe, lines: TBytes; tailFirst: Int64; db: TDecodeBands; k: Integer;
 begin
   d := nil;
   Result := ReadStream(s, maxOut, h);
@@ -942,15 +1103,28 @@ begin
   if h.L.dataOffset > 0 then Move(s[h.hdrFirst], d[0], h.L.dataOffset);
   tailFirst := h.L.dataOffset + h.L.dataLength;
   if h.tailLen > 0 then Move(s[h.tailSrc], d[tailFirst], h.tailLen);
+  { the bands, each from its own bytes, into the pixels (or an HDR file's RGBE) }
+  db.n := h.bands; db.mode := h.mode;
   if h.L.format = rfHDR then begin
-    { the RGBE pixels, then the scanlines coded again, line by line }
+    db.Lp := RgbeLayout(h.L);
     rgbe := nil; SetLength(rgbe, h.L.width * h.L.height * 4);
-    DecodePixels(s, h.pixFirst, rgbe, RgbeLayout(h.L));
-    lines := HdrEncode(rgbe, h.modes, h.L);
+    db.out_ := rgbe;
+  end else begin
+    db.Lp := h.L;
+    db.out_ := d;
+  end;
+  db.bytes := nil; SetLength(db.bytes, db.n);
+  for k := 0 to db.n - 1 do db.bytes[k] := Copy(s, h.bandFirst[k], h.bandLen[k]);
+  db.failed := nil; SetLength(db.failed, db.n);
+  RunJobs(db.n, threads, @DecodeBandJob, @db);
+  for k := 0 to db.n - 1 do
+    if db.failed[k] then begin d := nil; Exit(dsBadStream); end;
+  if h.L.format = rfHDR then begin
+    { the scanlines coded again, line by line }
+    lines := HdrEncode(db.out_, h.modes, h.L);
     if Length(lines) <> h.L.dataLength then begin d := nil; Exit(dsBadStream); end;
     if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
-  end else
-    DecodePixels(s, h.pixFirst, d, h.L, h.mode);
+  end;
   Result := dsOk;
 end;
 

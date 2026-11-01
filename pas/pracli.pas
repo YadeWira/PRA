@@ -36,6 +36,8 @@ var
   threads: Integer;
   maxOutput: QWord;
   errors: Integer;
+  { threads per file: what is left of -th once the files are shared out }
+  bandThreads: Integer;
 
 type
   { One input: what it printed and whether it failed. Files are processed
@@ -136,7 +138,8 @@ begin
   Writeln('  -o PATH              output name (one input), or directory (ends in / or exists)');
   Writeln('  --output-dir=DIR     output directory');
   Writeln('  -f, --force          replace an existing output (only with something that verified)');
-  Writeln('  -th N, --threads=N   files at once (default: the processors, up to 8)');
+  Writeln('  -th N, --threads=N   threads (default: the processors, up to 8): several');
+  Writeln('                       files at once, and what is left to each file''s bands');
   Writeln('  --max-output=SIZE    x: refuse a declared original above SIZE (256M; 0 = no limit)');
   Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
   Writeln('  -n, --dry-run        do everything but write');
@@ -325,7 +328,7 @@ begin
   if not ReadWhole(f, d) then Exit;
   if IsPra(d) then begin Fail(f + ': already a .pra'); Exit; end;
   { the extension, as it is written, for x to give it back }
-  r := Pack(d, pra, Copy(ExtractFileExt(f), 2, MaxInt));
+  r := Pack(d, pra, Copy(ExtractFileExt(f), 2, MaxInt), bandThreads);
   if not r.Ok then begin
     if r.err = ukNotRaster then Fail(f + ': not an image PRA takes (' + r.why + ')')
     else Fail(f + ': ' + r.Text);
@@ -360,7 +363,7 @@ procedure ExtractOne(const f: string);
 var d, orig: TBytes; r: TPackResult; path, ext: string; h: THash16;
 begin
   if not ReadWhole(f, d) then Exit;
-  r := Unpack(d, maxOutput, orig, h);
+  r := Unpack(d, maxOutput, orig, h, bandThreads);
   if r.err = ukTooLarge then begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
@@ -460,9 +463,10 @@ begin
     jobs[i] := Default(TFileJob);
     jobs[i].name := inputs[i];
   end;
-  { one file a thread }
+  { the threads go to files first, and what is left to each file's bands }
   workers := threads;
   if workers > inputs.Count then workers := inputs.Count;
+  bandThreads := threads div workers;
   nextJob := 0; nextPrint := 0;
   InitCriticalSection(printLock);
   pool := nil;

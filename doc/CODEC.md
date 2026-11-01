@@ -33,8 +33,20 @@ layout      format 1 B, width, height, channels (varints), bits 1 B,
             coder as runs: mode 1 B (0 flat, 1 Radiance, 2 stb), count (varint)
 tail        varint length, then the bytes as they are
   one channel of 2 to 8 bits only: the pixel mode, 1 B (0 samples, 1 indices)
-pixels      arithmetic-coded, to the end of the stream
+bands       how many (varint, 1 to 256 and at most the rows), then the length
+            of each but the last (varints)
+pixels      each band arithmetic-coded on its own, one after the other, to
+            the end of the stream
 ```
+
+**Bands.** The rows (of the pixels, or of an HDR file's RGBE) are cut into
+bands of about the same number of rows, each coded with fresh models and its
+own arithmetic coder, never looking at the band above: so they are coded and
+decoded at once, one a thread. The encoder makes each at least 2 MiB of
+pixels, at most 256; the decoder reads how many from the stream, so the
+stream is the same whatever the threads. Each band is decoded from its own
+copy of its bytes: what the arithmetic decoder reads past a band's end is
+zeros, exactly as when the encoder's verifier decoded it.
 
 Format numbers: 1 PBM, 2 PGM, 3 PPM, 4 PAM, 5 PFM, 6 BMP, 7 HDR. New formats
 take the next number; a number never changes meaning.
@@ -158,9 +170,31 @@ Where it stands (the `pra` command, a machine with other work on it):
 | sample_1920x1280.ppm (a noisy photo) | 7.37 MB | 10.9 s | 10.2 s |
 | abydos.ppm | 1.44 MB | 1.2 s | 1.1 s |
 
-About 0.7 to 1.2 MB/s each way, from 0.3 MB/s at the start. More would
-need the format to change: independent bands (several threads, as PJA
-does), or fewer contexts.
+About 0.7 to 1.2 MB/s each way, from 0.3 MB/s at the start, on one band;
+then bands (below).
+
+### 01/11/2026: bands
+
+What independent bands cost on the tuning set (8 threads), and what they
+give (`bench_codec`, compress and verify, 8 threads):
+
+| band size | tuning set | sample_1920x1280.ppm | sample_1920x1280.hdr |
+|---|---|---|---|
+| one band | 6,965,359 | 9,928 ms | 15,145 ms |
+| 4 MiB | 6,965,359 | | |
+| **2 MiB** | 6,967,960 (+0.04%) | 4,393 ms | 6,155 ms |
+| 1 MiB | 6,977,388 (+0.17%) | 2,395 ms | 4,917 ms |
+| 512 KiB | 6,992,865 (+0.40%) | | |
+
+2 MiB kept. The `pra` command, its default threads (the processors, up to
+8), each file decompressed and compared:
+
+| file | size | `pra a` | `pra x` |
+|---|---|---|---|
+| sample_1920x1280.ppm | 7.0 MB | 4.4 s | 3.8 s |
+| sample_1920x1280.pfm | 28.1 MB | 8.7 s | 7.6 s |
+| forest_path.hdr | 10.2 MB | 5.9 s | 5.0 s |
+| abydos.ppm (one band) | 1.4 MB | 1.3 s | 1.1 s |
 
 A smaller counter table (2^16 instead of 2^22) was only 3.5% faster: the
 time goes to computing, not to waiting for memory. Choosing between samples
