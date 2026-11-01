@@ -10,3 +10,8 @@ nothing is written unless it verified.
 
 Status: design phase. See [doc/FORMATS.md](doc/FORMATS.md) for the target
 formats.
+
+## License
+
+MIT (see [LICENSE](LICENSE)). PRA is a new implementation: it takes ideas
+from packPNM (LGPLv3) but none of its code.
