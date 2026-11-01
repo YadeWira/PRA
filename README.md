@@ -11,13 +11,15 @@ code with packPNM and does not read its files.
 The original comes back **byte for byte**, and nothing is written unless it
 verified.
 
-Status: design phase. Built bottom-up, each layer with its tests:
+Status: design phase. Limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
 
 | Layer | Unit | Status |
 |---|---|---|
 | hash (BLAKE3-128) | `pas/prablake3.pas` | done, from PJA |
 | binary arithmetic coder | `pas/praarith.pas` | done, from PJA |
-| raster parsers | | next: PNM/PAM/PFM |
+| raster layout, limits | `pas/praraster.pas`, `pas/pralimits.pas` | done |
+| Netpbm parser (P4-P7, PF/Pf) | `pas/prapnm.pas` | done |
+| more parsers | | BMP, HDR, then [the list](doc/FORMATS.md) |
 | model and codec stream | | |
 | container | | |
 | command line | | |
