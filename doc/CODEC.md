@@ -121,6 +121,29 @@ Tried and left as they were: counter limit 255 (the counters adapt too
 slowly: worse than 127), initial mixer weights (0.09 is best), mixer rates
 6 to 10 (flat).
 
+### 01/11/2026: speed, first pass
+
+`bench_codec` (compress and verify, the fast build, one thread pinned to a
+core, the best of three) on abydos.ppm, house.l.pgm and abydos.hdr; and
+callgrind's instruction count on dragon.ppm, which does not depend on the
+machine's load. One change at a time; the output stays the same bytes
+unless said.
+
+| change | 3 files | dragon.ppm, instructions |
+|---|---|---|
+| start | 10,796 ms | |
+| `{$inline on}` in pra.inc: FreePascal ignored `inline` without it | 8,683 ms | 3,610 M (with the next two) |
+| the mixer's weights walked by pointer | 8,291 ms | |
+| the mixer's two loops in SSE4.1 assembly, chosen by cpuid, with Pascal twins (`test_model` compares them; `PRA_NOASM=1` forces Pascal) | 7,891 ms | |
+| the blend's weights from a table of 2^30 / c^2 instead of two divisions each (changes the streams: 6,965,346 -> 6,965,349 on the tuning set) | about the same | |
+| the stretch and rate tables in the interface (FreePascal does not inline a function using its unit's private symbols: St16 and CounterUpdate stayed calls); both mixers read one array of inputs | **5,909 ms** | **2,980 M** |
+
+A smaller counter table (2^16 instead of 2^22) was only 3.5% faster: the
+time goes to computing, not to waiting for memory. Choosing between samples
+and indices on the first 65,536 samples' rows instead of the whole image
+(the same choice on every file of the corpus) halves the time of one-channel
+images: SWAN.BGA 4.5 s -> 2.7 s.
+
 ### 01/11/2026: BMP and HDR, and the indices mode
 
 On the BMP and HDR files of the local corpus. Palette images were the weak

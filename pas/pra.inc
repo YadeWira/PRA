@@ -15,3 +15,6 @@
 {$R+}
 {$Q+}
 {$modeswitch advancedrecords}
+{ without it FreePascal ignores `inline`: the model's small functions were
+  calls (measured 01/11/2026) }
+{$inline on}

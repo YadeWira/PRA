@@ -161,25 +161,28 @@ type
   end;
 
 function TPixelCoder.Code(b, node, cls: Integer): Integer;
-var i, p: Integer; c: array[0..N_MODELS - 1] of PCounter;
+var i, p: Integer; nh, msk: Cardinal; tc: PCounter; c: array[0..N_MODELS - 1] of PCounter;
 begin
+  { the counters straight from the table (the mask keeps them inside), their
+    stretch into mx's inputs, which mx2 reads too }
+  tc := @t.c[0]; msk := Cardinal(t.mask); nh := NODE_H[node];
   for i := 0 to nm - 1 do begin
-    c[i] := t.At(hm[i] xor NODE_H[node]);
-    mx.Add(St16(c[i]^.p));
-    if sel2 >= 0 then mx2.Add(St16(c[i]^.p));
+    c[i] := @tc[(hm[i] xor nh) and msk];
+    mx.x[i] := STRETCH_T[c[i]^.p shr 4];
   end;
-  mx.Add(256);
+  mx.x[nm] := 256;
+  mx.n := nm + 1;
   p := mx.Mix(cls + N_CLASSES * sel);
   if sel2 >= 0 then begin
-    mx2.Add(256);
+    mx2.ext := @mx.x[0]; mx2.n := mx.n;
     p := Squash(SarLongint(Stretch(p) + Stretch(mx2.Mix(sel2 * N_CLASSES + cls)), 1));
     p := (p + 3 * apm.Refine(p, cls + N_CLASSES * apmCtx)) shr 2;
   end;
   p := p shl 4;
   if encoding then enc.Encode(b, p) else b := dec.Decode(p);
   for i := 0 to nm - 1 do CounterUpdate(c[i]^, b, COUNTER_LIMIT);
-  mx.Update(b);
   if sel2 >= 0 then begin mx2.Update(b); apm.Update(b); end;
+  mx.Update(b);
   Result := b;
 end;
 
@@ -326,6 +329,11 @@ end;
 
 const
   N_PRED = 12;
+  MAX_COST = 4095;
+
+var
+  { INV_SQ[c] = 2^30 div c^2: a predictor's weight by its cost }
+  INV_SQ: array[1..MAX_COST] of Integer;
 
 procedure CodeSamples(var pc: TPixelCoder; var d: TBytes; const L: TRasterLayout);
 var
@@ -409,14 +417,19 @@ begin
             cost[i2] := 1 + cW + cN + cNW + cNE;
             if cost[i2] < cmin then cmin := cost[i2];
           end;
-          { weights up to 1024, differences up to 2^9: well inside 32 bits }
+          { weights 2^30 / cost^2 from a table, shifted so that the best is
+            below 2048 (no division but the last); differences up to 2^10:
+            well inside 32 bits }
+          if cmin > MAX_COST then cmin := MAX_COST;
+          tq := BitLen(INV_SQ[cmin]) - 11;
+          if tq < 0 then tq := 0;
           sw := 0; acc := 0;
           for i2 := 0 to N_PRED - 1 do begin
-            tq := (1024 * cmin) div cost[i2];
-            wq := (tq * cmin) div cost[i2];
+            if cost[i2] > MAX_COST then wq := INV_SQ[MAX_COST] shr tq else wq := INV_SQ[cost[i2]] shr tq;
             acc := acc + wq * (pr[i2] - pr[8]);
             sw := sw + wq;
           end;
+          if sw = 0 then sw := 1;
           pred := pr[8] + acc div sw;
           qc := Cap(BitLen(cmin), 15);
         end else
@@ -613,6 +626,8 @@ begin
 end;
 
 const
+  { the encoder tries both modes on this many samples' worth of rows }
+  TRIAL_SAMPLES = 65536;
   MODE_SAMPLES = 0;     { predicted intensities }
   MODE_INDICES = 1;     { symbols: CodeIndices }
 
@@ -679,7 +694,8 @@ begin
 end;
 
 function EncodeOnly(const d: TBytes; const L: TRasterLayout): TBytes;
-var o: TSink; tailFirst, used: Int64; flags: Byte; px, alt, rgbe, modes: TBytes; y, run: Integer;
+var o: TSink; tailFirst, used, trialRows: Int64; flags: Byte; px, alt, rgbe, modes: TBytes; y, run, m: Integer;
+  Lp: TRasterLayout;
 begin
   o.Init;
   o.Put(STREAM_VERSION);
@@ -711,11 +727,24 @@ begin
   o.PutBytes(d, tailFirst, Length(d) - tailFirst);
   if L.format = rfHDR then px := EncodePixels(rgbe, RgbeLayout(L))
   else if HasMode(L) then begin
-    { both ways, and the smaller one }
-    px := EncodePixels(d, L, MODE_SAMPLES);
-    alt := EncodePixels(d, L, MODE_INDICES);
-    if Length(alt) < Length(px) then begin o.Put(MODE_INDICES); px := alt; end
-    else o.Put(MODE_SAMPLES);
+    { both ways, and the smaller one: on the whole image when it is small,
+      on its first rows (at least TRIAL_SAMPLES) otherwise. Only the
+      encoder chooses; the decoder reads the mode byte. }
+    Lp := L;
+    trialRows := (TRIAL_SAMPLES + L.rowBytes * 8 div L.bits - 1) div (L.rowBytes * 8 div L.bits);
+    if trialRows < L.height then begin
+      Lp.height := trialRows;
+      if Length(EncodePixels(d, Lp, MODE_INDICES)) < Length(EncodePixels(d, Lp, MODE_SAMPLES)) then
+        m := MODE_INDICES
+      else m := MODE_SAMPLES;
+      o.Put(m);
+      px := EncodePixels(d, L, m);
+    end else begin
+      px := EncodePixels(d, L, MODE_SAMPLES);
+      alt := EncodePixels(d, L, MODE_INDICES);
+      if Length(alt) < Length(px) then begin o.Put(MODE_INDICES); px := alt; end
+      else o.Put(MODE_SAMPLES);
+    end;
   end else px := EncodePixels(d, L);
   o.PutBytes(px, 0, Length(px));
   Result := o.Done;
@@ -832,4 +861,5 @@ end;
 var k: Integer;
 initialization
   for k := 0 to High(NODE_H) do NODE_H[k] := Hash2(Cardinal(k) + 1000, $5EED);
+  for k := 1 to MAX_COST do INV_SQ[k] := (1 shl 30) div (k * k);
 end.
