@@ -458,3 +458,84 @@ def mipchain(w, h, ch):
 head = b'DDS ' + struct.pack('<7I', 124, 0x2100F, 8, 8, 32, 0, 4) + bytes(44)
 head += struct.pack('<8I', 32, 0x41, 0, 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000) + struct.pack('<5I', 0x401008, 0x200 | 0x400 | 0x800, 0, 0, 0)
 write('dds_cube_mips.dds', head + mipchain(8, 8, 4) + mipchain(8, 8, 4))
+
+# ---------- BMP run-length, plain Netpbm ----------
+out = os.path.join(root, 'bmp')
+
+# RLE8 and RLE4: a usual writer (runs of 2 and up, literals of 3 and up,
+# rows apart, an end of row and an end of bitmap), one that chooses at
+# random (moves, rows ended early, padding bytes not zero, no end of
+# bitmap), and one that codes each row's padding too (ImageMagick)
+def bmp_rle(w, h, bits, px, randomly=False, padded=False):
+    wp = ((w * bits + 31) // 32 * 4) * 8 // bits if padded else w
+    out_ = bytearray()
+    y = 0
+    while y < h:
+        row = [px(x, y) if x < w else 0 for x in range(wp)]
+        x = 0
+        while x < wp:
+            if randomly and rand() % 23 == 0 and y + 1 < h and x < w - 2:
+                dx = rand() % 3
+                out_ += bytes([0, 2, dx, 0]); x += dx; continue      # a move along the row
+            if randomly and rand() % 41 == 0 and x > 0:
+                break                                                # the row ended early
+            r = 1
+            while x + r < wp and r < 255 and (row[x + r] == row[x] if bits == 8 else row[x + r] == row[x + (r & 1)]):
+                r += 1
+            if randomly and r > 1: r = 1 + rand() % r
+            if r >= 2 or wp - x < 3:
+                v = row[x] if bits == 8 else (row[x] << 4) | (row[x + 1] if r > 1 else (rand() % 16 if randomly else 0))
+                out_ += bytes([r, v]); x += r; continue
+            n = 3
+            while x + n < wp and n < 255 and not (x + n + 1 < wp and row[x + n] == row[x + n + 1]): n += 1
+            if randomly: n = 3 + rand() % (n - 2)
+            vals = row[x:x + n]
+            if bits == 8: data = bytes(vals)
+            else:
+                data = bytes(((vals[i] << 4) | (vals[i + 1] if i + 1 < n else (rand() % 16 if randomly else 0))) for i in range(0, n, 2))
+            out_ += bytes([0, n]) + data
+            if len(data) & 1: out_ += bytes([rand() % 256 if randomly else 0])
+            x += n
+        y += 1
+        if y < h or not randomly: out_ += b'\x00\x00' if y < h else b''
+    if not randomly or rand() % 2: out_ += b'\x00\x01'
+    return bytes(out_)
+
+def bmp_rle_file(name, w, h, bits, px, **kw):
+    pal = b''.join(bytes([i * 13 % 256, i * 29 % 256, i * 47 % 256, 0]) for i in range(1 << bits))
+    data = bmp_rle(w, h, bits, px, **kw)
+    off = 14 + 40 + len(pal)
+    head = b'BM' + struct.pack('<IHHI', off + len(data), 0, 0, off)
+    head += struct.pack('<IiiHHIIiiII', 40, w, h, 1, bits, 1 if bits == 8 else 2, len(data), 2835, 2835, 1 << bits, 0)
+    write(name, head + pal + data)
+
+blob = lambda x, y: ((x // 6) + (y // 4) * 3) % 11 if (x - 20) ** 2 + (y - 12) ** 2 < 150 else 2
+bmp_rle_file('rle8_usual.bmp', 47, 25, 8, lambda x, y: blob(x, y) * 7)
+bmp_rle_file('rle8_random.bmp', 41, 23, 8, lambda x, y: blob(x, y) * 3, randomly=True)
+bmp_rle_file('rle8_padded.bmp', 45, 19, 8, lambda x, y: blob(x, y) * 5, padded=True)
+bmp_rle_file('rle4_usual.bmp', 43, 21, 4, lambda x, y: blob(x, y))
+bmp_rle_file('rle4_random.bmp', 39, 22, 4, lambda x, y: (blob(x, y) + x % 2) % 16, randomly=True)
+
+# plain: netpbm's (numbers padded to maxval's width, lines up to 70
+# columns), ImageMagick's (a row a line), P1's digits run together, a
+# comment and CR LF among the numbers, zeros before numbers, 16 bits
+out = os.path.join(root, 'pnm')
+def wrap70(nums, width=0):
+    lines, cur = [], ''
+    for n in nums:
+        t = str(n).rjust(width)
+        if cur and len(cur) + 1 + len(t) > 70: lines.append(cur); cur = t
+        else: cur = (cur + ' ' + t) if cur else t
+    lines.append(cur)
+    return '\n'.join(lines) + '\n'
+g = [smooth(x, y, 0, 255) for y in range(14) for x in range(23)]
+write('plain_netpbm.pgm', ('P2\n23 14\n255\n' + ''.join(wrap70(g[y * 23:(y + 1) * 23], 3) for y in range(14))).encode())
+c = [smooth(x, y, ch, 255) for y in range(11) for x in range(17) for ch in range(3)]
+write('plain_rows.ppm', ('P3\n# rows\n17 11\n255\n' + ''.join(' '.join(map(str, c[y * 51:(y + 1) * 51])) + '\n' for y in range(11))).encode())
+b = [1 if (x * x + y * 3) % 7 < 3 else 0 for y in range(13) for x in range(29)]
+write('plain_run.pbm', ('P1\n29 13\n' + ''.join(''.join(map(str, b[y * 29:(y + 1) * 29])) + '\n' for y in range(13))).encode())
+odd = 'P2\r\n9 6\r\n65535\r\n'
+for y in range(6):
+    vals = [smooth(x, y, 0, 65535) for x in range(9)]
+    odd += ' '.join(('00' + str(v)) if (x + y) % 5 == 0 else str(v) for x, v in enumerate(vals)) + ('  # row %d\r\n' % y if y == 2 else '\r\n')
+write('plain_odd16.pgm', odd.encode())

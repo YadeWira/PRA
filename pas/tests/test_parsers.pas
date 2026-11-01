@@ -143,8 +143,7 @@ begin
   ExpectBmp(WithU32(d, 10, Length(d) + 1), psMalformed, 'the pixels after the end of the file');
   ExpectBmp(WithU32(d, 10, 20), psMalformed, 'the pixels inside the headers');
   ExpectBmp(Copy(d, 0, Length(d) - 1), psTruncated, 'one byte short');
-  ExpectBmp(WithU32(d, 30, 1), psUnsupported, 'RLE8');
-  ExpectBmp(WithU32(d, 30, 2), psUnsupported, 'RLE4');
+  ExpectBmp(WithU32(d, 30, 2), psMalformed, 'RLE4 at 8 bits');
   ExpectBmp(WithU32(d, 30, 4), psUnsupported, 'a JPEG inside');
   ExpectBmp(WithU32(d, 30, 5), psUnsupported, 'a PNG inside');
   ExpectBmp(WithU32(d, 30, 3), psMalformed, 'bitfields at 8 bits');
@@ -371,6 +370,23 @@ begin
   Check(ParseDds(WithU32(WithU32(d, 80, 4), 84, $31545844), L) = psUnsupported, 'DDS, DXT1: unsupported');
   Check(ParseDds(WithU32(d, 4, 100), L) = psMalformed, 'DDS, a header of 100 bytes: malformed');
 
+  Writeln('BMP run-length');
+  d := ReadAll(dirB + '/rle8_usual.bmp'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_BMP_RLE) and (L.bits = 8) and (L.dataOffset + L.dataLength = Length(d)),
+    'rle8_usual.bmp: RLE8, to its end of bitmap');
+  d := ReadAll(dirB + '/rle4_random.bmp'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_BMP_RLE) and (L.bits = 4), 'rle4_random.bmp: RLE4, moves, rows ended early');
+  d := ReadAll(dirB + '/rle8_padded.bmp'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.dataOffset + L.dataLength = Length(d)), 'rle8_padded.bmp: runs over the rows'' padding');
+  d := ReadAll(dirB + '/rle8_usual.bmp');
+  st := ParseBmp(Copy(d, 0, Length(d) - 7), L);
+  Check((st = psOk) and (L.dataOffset + L.dataLength <= Length(d) - 7), 'RLE8 cut short: the data ends with the file');
+  Check(ParseBmp(WithU32(d, 22, Cardinal(-25)), L) = psMalformed, 'RLE8 top-down: malformed');
+  dd := Copy(d, 0, Length(d)); dd[14 + 40 + 1024] := 200;
+  Check(ParseBmp(dd, L) = psUnsupported, 'RLE8, a run of 200 in a row of 47: unsupported');
+  Check(ParseBmp(WithU32(WithU32(d, 18, 60000), 22, 60000), L) = psUnsupported,
+    'RLE8, 60000 x 60000 in a few bytes: unsupported, nothing allocated');
+
   Writeln('several images a file');
   d := ReadAll(dirM + '/ico_three.ico');
   Check(Split(d, parts, fmt) and (fmt = rfICO) and Covers(d, parts) and (Kinds(parts) = 'biiiib')
@@ -433,7 +449,7 @@ begin
 
   Writeln('fuzzing');
   samples := nil;
-  for k := 0 to 11 do begin
+  for k := 0 to 13 do begin
     SetLength(samples, Length(samples) + 1);
     case k of
       0: samples[High(samples)] := ReadAll(dirB + '/palette8.bmp');
@@ -447,16 +463,18 @@ begin
       8: samples[High(samples)] := ReadAll(dirO + '/viff_rgb_be.viff');
       9: samples[High(samples)] := ReadAll(dirO + '/vips_rgb_be.v');
       10: samples[High(samples)] := ReadAll(dirO + '/dds_mips.dds');
+      12: samples[High(samples)] := ReadAll(dirB + '/rle4_random.bmp');
+      13: samples[High(samples)] := ReadAll(dirB + '/../pnm/plain_odd16.pgm');
     else samples[High(samples)] := ReadAll(dirO + '/sgi_rle_ymajor.rgb');
     end;
   end;
   bad := 0; oks := 0;
   for i := 1 to 20000 do begin
-    d := Copy(samples[i mod 12], 0, Length(samples[i mod 12]));
+    d := Copy(samples[i mod 14], 0, Length(samples[i mod 14]));
     if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
     for k := 1 to 1 + Integer(Rand mod 3) do
       { VIFF's fields are past its 512-byte comment }
-      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), IfThen(i mod 12 = 8, 620, 120))))] := Byte(Rand);
+      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), IfThen(i mod 14 = 8, 620, 120))))] := Byte(Rand);
     try
       st := ParseAny(d, L);
       if st = psOk then begin
@@ -467,8 +485,8 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, Format('20000 mutated headers of 11 formats: no exception, pixels inside (%d ok)', [oks]));
+  Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 145) then Halt(1);
+  if (failures > 0) or (cells < 151) then Halt(1);
 end.

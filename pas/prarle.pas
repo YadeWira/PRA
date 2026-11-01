@@ -94,6 +94,22 @@ function SgiRleLength(const d: TBytes; first: SizeInt; xs, ys, zs, bpc: Integer;
 function SgiRleRebuild(const px, side: TBytes; xs, ys, zs, bpc: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
 function SgiRleFits(xs, ys, zs, bpc: Integer; available: Int64): Boolean;
 
+{ ---------- BMP RLE8 and RLE4 ---------- }
+
+{ BMP compression 1 (8 bits) and 2 (4 bits): (n, v) is a run of n pixels
+  (RLE4: v's two nibbles in turn), (0, 0) ends a row, (0, 1) the bitmap,
+  (0, 2, dx, dy) moves, (0, n >= 3) is n pixels as they are, padded to two
+  bytes. Rows as the file has them (bottom up), padded to 4 bytes as an
+  uncompressed BMP's: some writers code the padding's pixels too. A pixel
+  a move or an early end skips is 0. }
+function BmpRleScan(const d: TBytes; first: SizeInt; w, h: Int64; bits: Integer;
+                    out raw, side: TBytes; out used: Int64): TParseStatus;
+function BmpRleLength(const d: TBytes; first: SizeInt; w, h: Int64; bits: Integer; out used: Int64): TParseStatus;
+function BmpRleRebuild(const raw, side: TBytes; w, h: Int64; bits: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
+{ whether the raw pixels are at most 4096 times the coded bytes (a file
+  that skips most of its pixels is not worth the memory) and MAX_RAW }
+function BmpRleFits(w, h: Int64; bits: Integer; available: Int64): Boolean;
+
 implementation
 
 uses praarith, pramodel;
@@ -754,6 +770,292 @@ begin
   if o <> usedLimit then Exit;
   coded := buf;
   Result := True;
+end;
+
+
+{ ---------- BMP RLE8 and RLE4 ---------- }
+
+const
+  BK_RUN = 0;
+  BK_ABS = 1;
+  BK_EOL = 2;
+  BK_EOB = 3;
+  BK_DELTA = 4;
+  BK_STOP = 5;          { the data ends here without an end of bitmap }
+
+type
+  TBmpToken = record
+    kind, count, v, nib, pad, dx, dy: Integer;
+  end;
+
+{ a row as BMP stores it, padded to 4 bytes: its bytes, its pixels.
+  Writers may code the padding's pixels too (ImageMagick does). }
+function BmpRowBytes(w: Int64; bits: Integer): Int64;
+begin Result := (w * bits + 31) div 32 * 4; end;
+
+function BmpRleFits(w, h: Int64; bits: Integer; available: Int64): Boolean;
+var raw: Int64;
+begin
+  Result := False;
+  if (w < 1) or (h < 1) or (w > MAX_RAW) or (h > MAX_RAW) or not (bits in [4, 8]) or (available < 0) then Exit;
+  raw := BmpRowBytes(w, bits);
+  if h > MAX_RAW div raw then Exit;
+  raw := raw * h;
+  Result := (raw <= MAX_RAW) and (raw <= 4096 * available + 65536);
+end;
+
+function BmpPx(const raw: TBytes; rb, x, y: Int64; bits: Integer): Integer; inline;
+begin
+  if bits = 8 then Result := raw[y * rb + x]
+  else if (x and 1) = 0 then Result := raw[y * rb + x shr 1] shr 4
+  else Result := raw[y * rb + x shr 1] and 15;
+end;
+
+procedure BmpSet(var raw: TBytes; rb, x, y: Int64; bits, v: Integer); inline;
+var o: Int64;
+begin
+  if bits = 8 then raw[y * rb + x] := v
+  else begin
+    o := y * rb + x shr 1;
+    if (x and 1) = 0 then raw[o] := (raw[o] and 15) or (v shl 4) else raw[o] := (raw[o] and $F0) or v;
+  end;
+end;
+
+{ the token at d[p], at pixel (x, y): what it is and its bytes. The data
+  ends (BK_STOP) after the rows without an end of bitmap, or with the file,
+  or before a token cut short (whose bytes are then the tail). }
+function BmpReadToken(const d: TBytes; p: SizeInt; x, y, wp, h: Int64; bits: Integer;
+                      out t: TBmpToken; out size: Integer): TParseStatus;
+var nb: Integer;
+begin
+  t.kind := BK_STOP; t.count := 0; t.v := 0; t.nib := 0; t.pad := 0; t.dx := 0; t.dy := 0; size := 0;
+  Result := psOk;
+  if y >= h then begin
+    if (p + 2 <= Length(d)) and (d[p] = 0) and (d[p + 1] = 1) then begin t.kind := BK_EOB; size := 2; end;
+    Exit;
+  end;
+  if p + 2 > Length(d) then Exit;
+  if d[p] > 0 then begin
+    t.kind := BK_RUN; t.count := d[p]; t.v := d[p + 1]; t.nib := d[p + 1] and 15; size := 2;
+    if x + t.count > wp then Exit(psUnsupported);      { a run past the row }
+    Exit(psOk);
+  end;
+  case d[p + 1] of
+    0: begin t.kind := BK_EOL; size := 2; end;
+    1: begin t.kind := BK_EOB; size := 2; end;
+    2: begin
+      if p + 4 > Length(d) then Exit;
+      t.kind := BK_DELTA; t.dx := d[p + 2]; t.dy := d[p + 3]; size := 4;
+      if (x + t.dx > wp) or (y + t.dy >= h) then Exit(psUnsupported);
+    end;
+  else
+    nb := (d[p + 1] * bits + 7) div 8;
+    if p + 2 + nb + (nb and 1) > Length(d) then Exit;
+    t.kind := BK_ABS; t.count := d[p + 1];
+    size := 2 + nb + (nb and 1);
+    if x + t.count > wp then Exit(psUnsupported);
+    if (bits = 4) and Odd(t.count) then t.nib := d[p + 2 + nb - 1] and 15;
+    if Odd(nb) then t.pad := d[p + 2 + nb];
+  end;
+  Result := psOk;
+end;
+
+{ the token's effect on the position (and, with raw, its pixels) }
+procedure BmpApply(const d: TBytes; p: SizeInt; const t: TBmpToken; var x, y: Int64; bits: Integer;
+                   var raw: TBytes; rb: Int64; fill: Boolean);
+var i, v: Integer;
+begin
+  case t.kind of
+    BK_RUN: begin
+      if fill then
+        for i := 0 to t.count - 1 do begin
+          if bits = 8 then v := t.v else if Odd(i) then v := t.v and 15 else v := t.v shr 4;
+          BmpSet(raw, rb, x + i, y, bits, v);
+        end;
+      Inc(x, t.count);
+    end;
+    BK_ABS: begin
+      if fill then
+        for i := 0 to t.count - 1 do begin
+          if bits = 8 then v := d[p + 2 + i]
+          else if Odd(i) then v := d[p + 2 + i shr 1] and 15 else v := d[p + 2 + i shr 1] shr 4;
+          BmpSet(raw, rb, x + i, y, bits, v);
+        end;
+      Inc(x, t.count);
+    end;
+    BK_EOL: begin x := 0; Inc(y); end;
+    BK_DELTA: begin Inc(x, t.dx); Inc(y, t.dy); end;
+  end;
+end;
+
+function BmpRleLength(const d: TBytes; first: SizeInt; w, h: Int64; bits: Integer; out used: Int64): TParseStatus;
+var p: SizeInt; x, y: Int64; t: TBmpToken; size: Integer; none: TBytes;
+begin
+  used := 0; none := nil;
+  if not (bits in [4, 8]) or (w < 1) or (h < 1) then Exit(psMalformed);
+  p := first; x := 0; y := 0;
+  repeat
+    Result := BmpReadToken(d, p, x, y, BmpRowBytes(w, bits) * 8 div bits, h, bits, t, size);
+    if Result <> psOk then Exit;
+    BmpApply(d, p, t, x, y, bits, none, 0, False);
+    Inc(p, size);
+  until t.kind in [BK_EOB, BK_STOP];
+  used := p - first;
+  if not BmpRleFits(w, h, bits, used) then Result := psUnsupported;
+end;
+
+function BmpBucket(v: Integer): Integer; inline;
+begin
+  if v <= 3 then Result := v else if v <= 7 then Result := 4 else if v <= 31 then Result := 5
+  else if v < 255 then Result := 6 else Result := 7;
+end;
+
+{ one token's choices, both ways. Contexts: what a usual writer does there:
+  the run of equal pixels (RLE4: of the same two in turn), the literal up
+  to the next pair, the row's end, the previous token. }
+procedure CodeBmpToken(var pc: TPacketCoder; const raw: TBytes; rb, x, y, w, wp, h: Int64; bits: Integer;
+                       atEnd: Boolean; var prev: Integer; var t: TBmpToken);
+var er, lit, cap, k, nb, ctx: Integer; isPixel, isAbs: Integer;
+begin
+  { where the data ends, the decoder knows (its length): after the rows,
+    what is left is an end of bitmap }
+  if atEnd then begin t.kind := BK_STOP; Exit; end;
+  if y >= h then begin t.kind := BK_EOB; Exit; end;
+  isPixel := Ord(t.kind in [BK_RUN, BK_ABS]);
+  if x < wp then isPixel := pc.Bit(1 + prev + 6 * Ord(x = 0) + 12 * Ord(x >= w), isPixel) else isPixel := 0;
+  if isPixel <> 0 then begin
+    { a usual writer stops at the row's end, or at its padding's }
+    if x < w then cap := w - x else cap := wp - x;
+    if cap > 255 then cap := 255;
+    { the run a usual writer sees: equal pixels (RLE4: two in turn) }
+    er := 1;
+    if bits = 8 then
+      while (er < cap) and (BmpPx(raw, rb, x + er, y, bits) = BmpPx(raw, rb, x, y, bits)) do Inc(er)
+    else
+      while (er < cap) and (BmpPx(raw, rb, x + er, y, bits) = BmpPx(raw, rb, x + (er and 1), y, bits)) do Inc(er);
+    { the literal: up to where two equal pixels begin }
+    lit := 1;
+    while (lit < cap) and not ((lit + 1 < cap) and (BmpPx(raw, rb, x + lit, y, bits) = BmpPx(raw, rb, x + lit + 1, y, bits))) do
+      Inc(lit);
+    if lit < 3 then lit := 3;
+    if lit > cap then lit := cap;
+    isAbs := Ord(t.kind = BK_ABS);
+    if wp - x >= 3 then isAbs := pc.Bit(32 + BmpBucket(er) + 8 * Ord(prev = BK_ABS) + 16 * Ord(cap = er), isAbs)
+    else isAbs := 0;
+    if isAbs = 0 then begin
+      t.kind := BK_RUN;
+      if pc.Bit(64 + BmpBucket(er) + 8 * Ord(cap = er), Ord(t.count = er)) <> 0 then t.count := er
+      else t.count := pc.Tree(256, t.count, 8);
+      { RLE4: a run of one pixel leaves the second nibble free }
+      if (bits = 4) and (t.count = 1) then begin
+        if pc.Bit(80, Ord(t.nib = 0)) <> 0 then t.nib := 0 else t.nib := pc.Tree(512, t.nib, 4);
+      end;
+    end else begin
+      t.kind := BK_ABS;
+      if pc.Bit(96 + BmpBucket(lit) + 8 * Ord(lit = cap), Ord(t.count = lit)) <> 0 then t.count := lit
+      else t.count := pc.Tree(1024, t.count, 8);
+      nb := (t.count * bits + 7) div 8;
+      if (bits = 4) and Odd(t.count) then begin
+        if pc.Bit(112, Ord(t.nib = 0)) <> 0 then t.nib := 0 else t.nib := pc.Tree(544, t.nib, 4);
+      end;
+      if Odd(nb) then begin
+        if pc.Bit(113, Ord(t.pad = 0)) <> 0 then t.pad := 0 else t.pad := pc.Tree(1536, t.pad, 8);
+      end;
+    end;
+  end else begin
+    ctx := 160 + Ord(x = w) + 2 * Ord(x = 0) + 4 * Ord(y = h - 1) + 8 * Ord(x = wp);
+    if pc.Bit(ctx, Ord(t.kind = BK_EOL)) <> 0 then t.kind := BK_EOL
+    else if pc.Bit(ctx + 16, Ord(t.kind = BK_EOB)) <> 0 then t.kind := BK_EOB
+    else begin
+      t.kind := BK_DELTA;
+      t.dx := pc.Tree(2048, t.dx, 8);
+      t.dy := pc.Tree(2560, t.dy, 8);
+    end;
+  end;
+  k := t.kind;
+  prev := k;
+end;
+
+function BmpRleScan(const d: TBytes; first: SizeInt; w, h: Int64; bits: Integer;
+                    out raw, side: TBytes; out used: Int64): TParseStatus;
+var p: SizeInt; x, y, rb, wp: Int64; t: TBmpToken; size, prev: Integer; pc: TPacketCoder;
+begin
+  raw := nil; side := nil;
+  Result := BmpRleLength(d, first, w, h, bits, used);
+  if Result <> psOk then Exit;
+  rb := BmpRowBytes(w, bits); wp := rb * 8 div bits;
+  SetLength(raw, rb * h);
+  p := first; x := 0; y := 0;
+  repeat
+    BmpReadToken(d, p, x, y, wp, h, bits, t, size);
+    BmpApply(d, p, t, x, y, bits, raw, rb, True);
+    Inc(p, size);
+  until t.kind in [BK_EOB, BK_STOP];
+  pc.Init(True, nil);
+  p := first; x := 0; y := 0; prev := BK_EOL;
+  repeat
+    BmpReadToken(d, p, x, y, wp, h, bits, t, size);
+    CodeBmpToken(pc, raw, rb, x, y, w, wp, h, bits, p = first + used, prev, t);
+    BmpApply(d, p, t, x, y, bits, raw, rb, False);
+    Inc(p, size);
+  until t.kind in [BK_EOB, BK_STOP];
+  side := pc.enc.Finish;
+end;
+
+function BmpRleRebuild(const raw, side: TBytes; w, h: Int64; bits: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
+var
+  pc: TPacketCoder; x, y, rb, wp: Int64; o: SizeInt; t: TBmpToken; prev, i, nb, v: Integer;
+begin
+  coded := nil; Result := False;
+  if not (bits in [4, 8]) or (w < 1) or (h < 1) or (usedLimit < 0) then Exit;
+  rb := BmpRowBytes(w, bits); wp := rb * 8 div bits;
+  if Length(raw) <> rb * h then Exit;
+  SetLength(coded, usedLimit);
+  pc.Init(False, side);
+  x := 0; y := 0; o := 0; prev := BK_EOL;
+  repeat
+    t.kind := BK_STOP; t.count := 0; t.v := 0; t.nib := 0; t.pad := 0; t.dx := 0; t.dy := 0;
+    CodeBmpToken(pc, raw, rb, x, y, w, wp, h, bits, o = usedLimit, prev, t);
+    case t.kind of
+      BK_RUN: begin
+        if (t.count < 1) or (x + t.count > wp) or (o + 2 > usedLimit) then Exit;
+        if bits = 8 then v := BmpPx(raw, rb, x, y, bits)
+        else if t.count >= 2 then v := (BmpPx(raw, rb, x, y, bits) shl 4) or BmpPx(raw, rb, x + 1, y, bits)
+        else v := (BmpPx(raw, rb, x, y, bits) shl 4) or t.nib;
+        coded[o] := t.count; coded[o + 1] := v; Inc(o, 2);
+        Inc(x, t.count);
+      end;
+      BK_ABS: begin
+        nb := (t.count * bits + 7) div 8;
+        if (t.count < 3) or (x + t.count > wp) or (o + 2 + nb + (nb and 1) > usedLimit) then Exit;
+        coded[o] := 0; coded[o + 1] := t.count;
+        for i := 0 to nb - 1 do coded[o + 2 + i] := 0;
+        for i := 0 to t.count - 1 do
+          if bits = 8 then coded[o + 2 + i] := BmpPx(raw, rb, x + i, y, bits)
+          else if Odd(i) then coded[o + 2 + i shr 1] := coded[o + 2 + i shr 1] or BmpPx(raw, rb, x + i, y, bits)
+          else coded[o + 2 + i shr 1] := BmpPx(raw, rb, x + i, y, bits) shl 4;
+        if (bits = 4) and Odd(t.count) then coded[o + 2 + nb - 1] := coded[o + 2 + nb - 1] or t.nib;
+        if Odd(nb) then coded[o + 2 + nb] := t.pad;
+        Inc(o, 2 + nb + (nb and 1));
+        Inc(x, t.count);
+      end;
+      BK_EOL: begin
+        if o + 2 > usedLimit then Exit;
+        coded[o] := 0; coded[o + 1] := 0; Inc(o, 2);
+        x := 0; Inc(y);
+      end;
+      BK_EOB: begin
+        if o + 2 > usedLimit then Exit;
+        coded[o] := 0; coded[o + 1] := 1; Inc(o, 2);
+      end;
+      BK_DELTA: begin
+        if (x + t.dx > wp) or (y + t.dy >= h) or (o + 4 > usedLimit) then Exit;
+        coded[o] := 0; coded[o + 1] := 2; coded[o + 2] := t.dx; coded[o + 3] := t.dy; Inc(o, 4);
+        Inc(x, t.dx); Inc(y, t.dy);
+      end;
+    end;
+  until t.kind in [BK_EOB, BK_STOP];
+  Result := o = usedLimit;
 end;
 
 end.

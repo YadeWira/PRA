@@ -46,6 +46,19 @@ begin
       L.channels, L.bits, L.rowBytes]));
 end;
 
+{ a plain file given as text: status, and where its numbers are }
+procedure ExpectPlain(const text: string; want: TParseStatus; offset, len: Int64; const what: string);
+var L: TRasterLayout; got: TParseStatus; d: TBytes; i: Integer;
+begin
+  d := nil; SetLength(d, Length(text));
+  for i := 1 to Length(text) do d[i - 1] := Ord(text[i]);
+  got := ParsePnm(d, L);
+  if want = psOk then
+    Check((got = psOk) and (L.coding = CODING_PLAIN) and (L.dataOffset = offset) and (L.dataLength = len),
+      Format('%s: %s, numbers at %d, %d B', [what, StatusName(got), L.dataOffset, L.dataLength]))
+  else Check(got = want, Format('%s: %s', [what, StatusName(got)]));
+end;
+
 var seed: Cardinal;
 function Rand: Cardinal;
 begin seed := seed xor (seed shl 13); seed := seed xor (seed shr 17); seed := seed xor (seed shl 5); Result := seed; end;
@@ -95,9 +108,18 @@ begin
   Expect('BM', 10, 0, psNotThis, 'a BMP');
   Expect('P8 1 1 255' + LF, 1, 0, psNotThis, 'P8');
   Expect('P5abc', 10, 0, psNotThis, '"P5" then garbage');
-  Expect('P1' + LF + '1 1' + LF + '0' + LF, 0, 0, psUnsupported, 'P1, plain PBM');
-  Expect('P2 1 1 255' + LF + '0' + LF, 0, 0, psUnsupported, 'P2, plain PGM');
-  Expect('P3 1 1 255' + LF + '0 0 0' + LF, 0, 0, psUnsupported, 'P3, plain PPM');
+  ExpectPlain('P1' + LF + '1 1' + LF + '0' + LF, psOk, 6, 2, 'P1, plain PBM');
+  ExpectPlain('P2 1 1 255' + LF + '0' + LF, psOk, 10, 2, 'P2, plain PGM');
+  ExpectPlain('P3 1 1 255' + LF + '0 0 0' + LF, psOk, 10, 6, 'P3, plain PPM');
+  ExpectPlain('P1' + LF + '3 1' + LF + '101' + LF, psOk, 6, 4, 'P1, digits run together');
+  ExpectPlain('P2 2 1 255' + LF + '1 #a comment' + LF + '2' + LF, psOk, 10, 15, 'P2, a comment between numbers');
+  ExpectPlain('P2 1 1 1000' + LF + '65535' + LF, psOk, 11, 6, 'P2, maxval 1000: 16 bits, 65535 fits');
+  ExpectPlain('P2 3 1 255' + LF + '1 2', psTruncated, 0, 0, 'P2, two numbers of three');
+  ExpectPlain('P2 2 1 255' + LF + '12' + LF, psTruncated, 0, 0, 'P2, "12": one number, not two');
+  ExpectPlain('P2 1 1 255' + LF + '256' + LF, psUnsupported, 0, 0, 'P2, 256 in 8 bits');
+  ExpectPlain('P1' + LF + '2 1' + LF + '02' + LF, psUnsupported, 0, 0, 'P1, a digit 2');
+  ExpectPlain('P2 1 1 255' + LF + '00000000000000000007' + LF, psUnsupported, 0, 0, 'P2, 19 zeros before a number');
+  ExpectPlain('P2 1 1 255' + LF + 'x' + LF, psMalformed, 0, 0, 'P2, a letter for a number');
   Expect('P1x', 0, 0, psNotThis, '"P1x"');
   Expect('P5 3 2 255' + LF, 5, 0, psTruncated, 'P5 one byte short');
   Expect('P5 3 2 255' + LF, 0, 0, psTruncated, 'P5 with no pixels');
@@ -160,5 +182,5 @@ begin
   Check(bad = 0, '20000 random headers after a magic: no exception');
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 50) then Halt(1);
+  if (failures > 0) or (cells < 59) then Halt(1);
 end.

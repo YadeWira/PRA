@@ -73,7 +73,7 @@ function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain;
 
 { ---------- byte sink and source ---------- }
 
@@ -793,6 +793,8 @@ begin
   Result.dataOffset := 0;
   Result.rowBytes := (L.width * L.channels * L.bits + 7) div 8;
   if L.format = rfSUN then Result.rowBytes := (Result.rowBytes + 1) and not 1;
+  { a BMP's run-length rows: padded to 4 bytes, as the run-length codes them }
+  if L.coding = CODING_BMP_RLE then Result.rowBytes := (L.width * L.bits + 31) div 32 * 4;
   Result.dataLength := Result.rowBytes * L.height;
 end;
 
@@ -800,7 +802,8 @@ end;
 
 function SideCoded(const L: TRasterLayout): Boolean;
 begin
-  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES];
+  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES,
+                         CODING_BMP_RLE, CODING_PLAIN];
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
@@ -814,6 +817,8 @@ begin
     CODING_SUN_RLE: Result := ByteRleScan(brSun, d, L.dataOffset, R.dataLength, R.rowBytes, raw, side, used) = psOk;
     CODING_SGI_RLE: Result := SgiRleScan(d, L.dataOffset, L.width, L.height, L.channels, L.bits div 8,
                                          raw, side, used) = psOk;
+    CODING_BMP_RLE: Result := BmpRleScan(d, L.dataOffset, L.width, L.height, L.bits, raw, side, used) = psOk;
+    CODING_PLAIN: Result := PlainScan(d, L.dataOffset, R, raw, side, used) = psOk;
     CODING_PLANES: begin
       used := R.dataLength;
       Result := L.dataOffset + used <= Length(d);
@@ -840,6 +845,8 @@ begin
     CODING_TGA_RLE: Result := TgaRleRebuild(raw, side, L, PixelBytes(L), L.dataLength, coded);
     CODING_SUN_RLE: Result := ByteRleRebuild(brSun, raw, side, R.rowBytes, L.dataLength, coded);
     CODING_SGI_RLE: Result := SgiRleRebuild(raw, side, L.width, L.height, L.channels, L.bits div 8, L.dataLength, coded);
+    CODING_BMP_RLE: Result := BmpRleRebuild(raw, side, L.width, L.height, L.bits, L.dataLength, coded);
+    CODING_PLAIN: Result := PlainRebuild(raw, side, R, L.dataLength, coded);
     CODING_PLANES: begin
       coded := SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8);
       Result := Length(coded) = L.dataLength;
@@ -864,6 +871,8 @@ begin
     CODING_SGI_RLE: Result := (L.bits in [8, 16])
       and SgiRleFits(L.width, L.height, L.channels, L.bits div 8, L.dataLength);
     CODING_PLANES: Result := (L.bits in [8, 16]) and (L.dataLength = R.dataLength) and (R.dataLength <= MAX_RAW);
+    CODING_BMP_RLE: Result := (L.channels = 1) and BmpRleFits(L.width, L.height, L.bits, L.dataLength);
+    CODING_PLAIN: Result := PlainFits(L, L.dataLength);
     CODING_PCX: begin
       { the pixels' layout has to be the one the header gives (PcxFromPixels
         reads them by it), and the decoded lines have to fit }
@@ -930,8 +939,11 @@ begin
     rfSUN: if (flags and 8) <> 0 then h.L.coding := CODING_SUN_RLE;
     rfSGI: if (flags and 8) <> 0 then h.L.coding := CODING_SGI_RLE else h.L.coding := CODING_PLANES;
     rfVIFF: if h.L.channels > 1 then h.L.coding := CODING_PLANES;
+    rfBMP: if (flags and 8) <> 0 then h.L.coding := CODING_BMP_RLE;
+    rfPBM, rfPGM, rfPPM: if (flags and 8) <> 0 then h.L.coding := CODING_PLAIN;
   end;
-  if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE]) then Exit(dsBadStream);
+  if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE,
+                                                   CODING_BMP_RLE, CODING_PLAIN]) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
     { the coded length within the cap, the image within what that length
       can hold, and the coder's choices }
@@ -1219,7 +1231,7 @@ begin
   if L.bigEndian then flags := flags or 1;
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
-  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE] then flags := flags or 8;
+  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN] then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
   rgbe := nil; modes := nil; side := nil;

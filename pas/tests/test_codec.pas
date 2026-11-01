@@ -215,7 +215,8 @@ begin
   BandBytes := 1 shl 21;
 
   Writeln('refused');
-  Check(not EncodeFile(Bytes('P1'#10'2 2'#10'0 1 1 0'#10), s, why) and (why = 'unsupported variant'), 'plain PBM: ' + why);
+  Check(not EncodeFile(Bytes('P2 2 1 255'#10'7 300'#10), s, why) and (why = 'unsupported variant'),
+    'plain PGM, 300 in 8 bits: ' + why);
   Check(not EncodeFile(Bytes('just some text'), s, why), 'text: ' + why);
   s := nil;
   Check(not EncodeFile(s, s2, why), 'empty: ' + why);

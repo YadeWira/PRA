@@ -12,9 +12,9 @@ work in place).
 
 | Format | Pixels | Corpus folder (files) | Status |
 |---|---|---|---|
-| PBM / PGM / PPM | raw | pbm 14, pgm 14, ppm 14 | binary done; plain (P1-P3) not yet |
+| PBM / PGM / PPM | raw | pbm 14, pgm 14, ppm 14 | done: binary, and plain (P1-P3) given back with its writer's formatting |
 | PAM, PFM | raw | pam 6, pfm 4 | done |
-| BMP | raw, bitfields; RLE4/RLE8 | bmp 42 | raw and bitfields done (1 to 32 bits, OS/2 too); RLE not yet |
+| BMP | raw, bitfields; RLE4/RLE8 | bmp 42 | done: raw and bitfields (1 to 32 bits, OS/2 too), RLE8 and RLE4 whoever wrote them |
 | Radiance HDR | RGBE + RLE | radiance 10 | done (Radiance's and stb's run-length coders, flat lines) |
 
 ## Batch 1: header + raw/RLE pixels

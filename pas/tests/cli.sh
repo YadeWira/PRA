@@ -83,9 +83,9 @@ check "x on an image: rc 1" test "$(rc "$PRA" x "$W/in/gray8.pgm" -o "$W/xx.pgm"
 echo "not an image" > "$W/text.pgm"
 check "a on something else: rc 1, says why, nothing written" bash -c "
   ! '$PRA' a '$W/text.pgm' 2> '$W/err2.txt' && grep -q 'not an image PRA takes' '$W/err2.txt' && [ ! -e '$W/text.pra' ]"
-printf 'P1\n2 2\n0 1\n1 0\n' > "$W/plain.pbm"
-check "a plain PBM: rc 1, named as unsupported" bash -c "
-  ! '$PRA' a '$W/plain.pbm' 2> '$W/err3.txt' && grep -q 'unsupported variant' '$W/err3.txt'"
+printf 'P2 2 1 255\n7 300\n' > "$W/plain.pgm"
+check "a plain PGM with 300 in 8 bits: rc 1, named as unsupported" bash -c "
+  ! '$PRA' a '$W/plain.pgm' 2> '$W/err3.txt' && grep -q 'unsupported variant' '$W/err3.txt'"
 check "one bad among good ones: rc 1" test "$(rc "$PRA" a "$W/text.pgm" "$W/in/gray8.pgm" -o "$W/mix/")" -eq 1
 check "  and the good one is written" test -e "$W/mix/gray8.pra"
 check "a directory as input: rc 1" test "$(rc "$PRA" a "$W/in")" -eq 1

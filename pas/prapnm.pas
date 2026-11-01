@@ -14,8 +14,10 @@
     scale's sign gives the byte order (negative: little-endian).
 
   Samples above maxval are not an error here: the codec models the bytes as
-  they are, and maxval is only a hint. The plain (ASCII) variants P1, P2 and
-  P3 are psUnsupported: their exact formatting would have to be modelled. }
+  they are, and maxval is only a hint. The plain (text) variants P1, P2
+  and P3: the header as theirs, then the numbers as text (praplain, which
+  keeps the writer's formatting); the header ends right after its last
+  number. }
 unit prapnm;
 
 {$I pra.inc}
@@ -31,7 +33,7 @@ function ParsePnm(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses pralimits;
+uses pralimits, praplain;
 
 function IsSpace(b: Byte): Boolean; inline;
 begin
@@ -89,9 +91,9 @@ begin
   Result := SizeRows(L, Length(d) - p);
 end;
 
-{ P4, P5, P6 }
-function ParseClassic(const d: TBytes; var s: TScan; var L: TRasterLayout): TParseStatus;
-var v: Int64;
+{ P4, P5, P6, and plain P1, P2, P3 }
+function ParseClassic(const d: TBytes; var s: TScan; var L: TRasterLayout; plain: Boolean): TParseStatus;
+var v, used: Int64;
 begin
   SkipSpaceAndComments(d, s);
   if not ReadNumber(d, s, MAX_DIMENSION, L.width) then Exit(psMalformed);
@@ -105,6 +107,16 @@ begin
     L.maxval := v;
     if L.format = rfPPM then L.channels := 3 else L.channels := 1;
     if v < 256 then L.bits := 8 else L.bits := 16;
+  end;
+  if plain then begin
+    { the numbers' text (praplain) }
+    L.coding := CODING_PLAIN;
+    L.dataOffset := s.p;
+    Result := SizeRows(L, High(Int64) shr 2);
+    if Result = psOk then
+      Result := PlainLength(d, s.p, L.width * L.height * L.channels, L.bits = 1, (1 shl L.bits) - 1, used);
+    if Result = psOk then L.dataLength := used;
+    Exit;
   end;
   if not TakeOneSpace(d, s) then Exit(psMalformed);
   Result := Finish(d, L, s.p);
@@ -191,11 +203,9 @@ begin
     '7': L.format := rfPAM;
     'F': begin L.format := rfPFM; L.channels := 3; end;
     'f': begin L.format := rfPFM; L.channels := 1; end;
-    '1', '2', '3': begin
-      { only a real header counts: "P1" followed by whitespace }
-      if (Length(d) > 2) and IsSpace(d[2]) then Exit(psUnsupported);
-      Exit(psNotThis);
-    end;
+    '1': L.format := rfPBM;
+    '2': L.format := rfPGM;
+    '3': L.format := rfPPM;
   else Exit(psNotThis);
   end;
   s.p := 2;
@@ -204,7 +214,7 @@ begin
   case L.format of
     rfPAM: Result := ParsePam(d, s, L);
     rfPFM: Result := ParsePfm(d, s, L);
-  else Result := ParseClassic(d, s, L);
+  else Result := ParseClassic(d, s, L, d[1] in [Ord('1'), Ord('2'), Ord('3')]);
   end;
   { "P5" and garbage is not a broken PGM: tell it apart by the first byte
     after the magic, which in every real header is whitespace }

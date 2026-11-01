@@ -30,10 +30,11 @@ version     1 B     1
 header      a section: the bytes before the pixels
 layout      format 1 B, width, height, channels (varints), bits 1 B,
             flags 1 B (bit 0 big-endian, bit 1 float, bit 2 bottom-up,
-            bit 3 run-length coded: TGA, Sun Raster, SGI), maxval (varint)
+            bit 3 run-length coded (TGA, Sun Raster, SGI, BMP) or plain
+            text (PBM, PGM, PPM)), maxval (varint)
   HDR only: the scanlines' length (varint), then each line's run-length
             coder as runs: mode 1 B (0 flat, 1 Radiance, 2 stb), count (varint)
-  run-length TGA, Sun Raster, PCX, SGI: the coded length (varint), then the
+  run-length TGA, Sun Raster, PCX, SGI, BMP, plain Netpbm: the coded length (varint), then the
             coder's choices (varint length, then the bytes; prarle)
 tail        a section: the bytes after the pixels
   one channel of 2 to 8 bits only: the pixel mode, 1 B (0 samples, 1 indices)
@@ -173,6 +174,20 @@ run-length TGAs; this way, all 10.
   after the tables (every file of the corpus), their order coded as steps.
   SGI's planes (verbatim too) are interleaved as channels, and so are a
   VIFF file's bands.
+- BMP RLE8 and RLE4: (n, v) runs, (0, 0) end of row, (0, 1) end of
+  bitmap, (0, 2, dx, dy) moves, (0, n) literals padded to two bytes. The
+  rows are as wide as an uncompressed BMP's, padding included: some
+  writers (ImageMagick) code the padding's pixels too. A pixel a move or
+  an early end skips is 0. The data ends at the end of bitmap, or after
+  the rows, or with the file (the decoder knows its length).
+
+**Plain Netpbm (P1, P2, P3).** The numbers are an image (`praplain`); the
+writer's formatting is coded beside them: the separator before each
+number, a symbol at a time (space, LF, CR, TAB, another byte, the end), and
+any zeros a number starts with. Two contexts, averaged: the column where
+the next number would end (lines wrapped at so many columns:
+ImageMagick), and how many numbers the line holds (netpbm wraps at so
+many numbers); both with the separator before, and whether a row ends.
 
 **Radiance HDR.** The scanlines are decoded to RGBE (four 8-bit channels,
 green first, red and blue against it, the exponent last) and each line's
@@ -316,6 +331,19 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: BMP RLE8 and RLE4, plain Netpbm
+
+The corpus has 3 RLE BMPs (crowd.dt, input.bmp, VGALOGO.RLE: RLE4) and 6
+plain Netpbm files; with RLE BMPs and plain files written from corpus
+images by ImageMagick and netpbm: 20 files, 24.6 MB, 8.27%, all back byte
+for byte, every one below xz -9e (example.ppm, 10.8 MB: 1,154,710 against
+2,208,908; input.bmp 3,089 against 3,844). What the formatting costs, the
+same image plain against binary: abydos.pgm 48,148 binary, 49,776 from
+ImageMagick, 49,420 from netpbm (55,595 before the count-of-numbers
+context); testimg.ppm 13,568, 13,807, 13,790. ImageMagick's RLE8 codes
+each row's padding pixels too: 3 of the 6 RLE files were refused until
+the rows were as wide as their padding.
 
 ### 01/11/2026: several images a file (stream version 3)
 

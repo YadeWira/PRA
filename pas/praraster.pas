@@ -51,6 +51,8 @@ const
   CODING_SUN_RLE = 3;   { Sun Raster type 2 (prarle) }
   CODING_PCX = 4;       { PCX (prarle, its planes: praother) }
   CODING_SGI_RLE = 5;   { SGI run-length (prarle) }
+  CODING_BMP_RLE = 7;   { BMP RLE8 and RLE4 (prarle) }
+  CODING_PLAIN = 8;     { plain (text) PBM, PGM, PPM (praplain) }
   CODING_PLANES = 6;    { verbatim, the channels' planes one after the other
                           (SGI, VIFF): interleaved for the codec (prarle) }
 

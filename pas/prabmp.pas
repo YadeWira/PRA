@@ -14,7 +14,9 @@
   - 16 bits: one 16-bit little-endian sample;
   - 24 bits: three 8-bit channels (B, G, R);
   - 32 bits: four 8-bit channels (B, G, R, A or unused).
-  RLE4, RLE8, JPEG and PNG inside a BMP are psUnsupported. }
+  RLE8 and RLE4 are run-length coded (prarle: the pixels and the writer's
+  choices, given back exactly); JPEG and PNG inside a BMP are
+  psUnsupported. }
 unit prabmp;
 
 {$I pra.inc}
@@ -29,7 +31,7 @@ function ParseBmp(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses pralimits;
+uses pralimits, prarle;
 
 function U16(const d: TBytes; i: SizeInt): Int64;
 begin Result := d[i] or (d[i + 1] shl 8); end;
@@ -44,7 +46,7 @@ begin
 end;
 
 function ParseBmp(const d: TBytes; out L: TRasterLayout): TParseStatus;
-var offset, dib, w, h, bpp, comp: Int64;
+var offset, dib, w, h, bpp, comp, used: Int64;
 begin
   L.Clear;
   if (Length(d) < 2) or (d[0] <> Ord('B')) or (d[1] <> Ord('M')) then Exit(psNotThis);
@@ -75,7 +77,9 @@ begin
   case comp of
     0: ;
     3, 6: if (bpp <> 16) and (bpp <> 32) then Exit(psMalformed);
-    1, 2, 4, 5: Exit(psUnsupported);   { RLE8, RLE4, JPEG, PNG }
+    1: if bpp <> 8 then Exit(psMalformed);
+    2: if bpp <> 4 then Exit(psMalformed);
+    4, 5: Exit(psUnsupported);   { JPEG, PNG }
   else
     Exit(psMalformed);
   end;
@@ -88,6 +92,16 @@ begin
     Exit(psMalformed);
   end;
   L.dataOffset := offset;
+  if comp in [1, 2] then begin
+    { run-length coded (prarle): bottom-up only; the tokens' length }
+    if not L.bottomUp then begin L.format := rfNone; Exit(psMalformed); end;
+    L.coding := CODING_BMP_RLE;
+    Result := SizeRows(L, High(Int64) shr 2);
+    if Result = psOk then Result := BmpRleLength(d, offset, w, h, bpp, used);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+    L.dataLength := used;
+    Exit(psOk);
+  end;
   Result := SizeRows(L, Length(d) - offset);
   if Result <> psOk then L.format := rfNone;
 end;
