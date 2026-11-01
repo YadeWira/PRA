@@ -11,7 +11,7 @@
     with and without PRA_FAST and demands the same line. }
 program test_codec;
 {$I ../pra.inc}
-uses SysUtils, prablake3, praraster, pracodec;
+uses {$ifdef UNIX} cthreads, {$endif} SysUtils, prablake3, praraster, pracodec;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);

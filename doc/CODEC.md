@@ -138,6 +138,15 @@ unless said.
 | the blend's weights from a table of 2^30 / c^2 instead of two divisions each (changes the streams: 6,965,346 -> 6,965,349 on the tuning set) | about the same | |
 | the stretch and rate tables in the interface (FreePascal does not inline a function using its unit's private symbols: St16 and CounterUpdate stayed calls); both mixers read one array of inputs | **5,909 ms** | **2,980 M** |
 
+Then the check beside the encoding: `EncodeFile` decoded its whole stream
+after writing it; now a second thread decodes the pixel coder's bytes as
+they come out (pjaarith's TLiveStream), and the part before the pixels is
+read back from the final stream as the decoder reads it. The same streams,
+the same guarantee (the decoder never sees the original), half the time on
+two cores: the three files, pinned to two cores, **3,244 ms**. A bare
+thread (BeginThread): TThread.WaitFor from the main thread waits in steps
+of 100 ms in FreePascal 3.2, which made every small file 100 ms slower.
+
 A smaller counter table (2^16 instead of 2^22) was only 3.5% faster: the
 time goes to computing, not to waiting for memory. Choosing between samples
 and indices on the first 65,536 samples' rows instead of the whole image

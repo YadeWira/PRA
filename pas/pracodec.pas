@@ -693,10 +693,157 @@ begin
   Result.dataLength := Result.rowBytes * L.height;
 end;
 
-function EncodeOnly(const d: TBytes; const L: TRasterLayout): TBytes;
-var o: TSink; tailFirst, used, trialRows: Int64; flags: Byte; px, alt, rgbe, modes: TBytes; y, run, m: Integer;
-  Lp: TRasterLayout;
+{ What the stream says before its pixels: ReadStream reads it (the decoder,
+  and the encoder checking what it wrote), with every limit applied before
+  anything is allocated. }
+type
+  TStreamHead = record
+    L: TRasterLayout;
+    modes: TBytes;                 { HDR: each line's coder }
+    mode: Integer;                 { one channel of 2-8 bits: samples or indices }
+    hdrFirst, tailSrc, pixFirst: SizeInt;
+    tailLen: Int64;
+  end;
+
+function ReadStream(const s: TBytes; maxOut: Int64; out h: TStreamHead): TDecodeStatus;
+var
+  src: TSource; hdrLen, run, y: Int64; flags, f, ver, m, k: Integer;
 begin
+  h.modes := nil; h.mode := MODE_SAMPLES; h.L.Clear;
+  h.hdrFirst := 0; h.tailSrc := 0; h.pixFirst := 0; h.tailLen := 0;
+  if Length(s) = 0 then Exit(dsEmpty);
+  src.b := s; src.p := 0; src.ok := True;
+  ver := src.Get;
+  if ver > STREAM_VERSION then Exit(dsFutureVersion);
+  if ver <> 1 then Exit(dsBadStream);
+  hdrLen := src.GetVarint(MAX_TEXT_HEADER);
+  if not src.ok or (hdrLen > Length(s) - src.p) then Exit(dsBadStream);
+  h.hdrFirst := src.p; Inc(src.p, hdrLen);
+  f := src.Get;
+  if (f <= Ord(Low(TRasterFormat))) or (f > Ord(High(TRasterFormat))) then Exit(dsBadStream);
+  h.L.format := TRasterFormat(f);
+  h.L.width := src.GetVarint(MAX_DIMENSION);
+  h.L.height := src.GetVarint(MAX_DIMENSION);
+  h.L.channels := src.GetVarint(MAX_CHANNELS);
+  h.L.bits := src.Get;
+  flags := src.Get;
+  h.L.maxval := src.GetVarint(High(Cardinal));
+  if h.L.format = rfHDR then begin
+    { the scanlines' length within the cap, and the image within what that
+      length can hold, before anything is allocated }
+    h.L.dataLength := src.GetVarint(maxOut);
+    if not src.ok then Exit(dsBadStream);
+    if (h.L.channels <> 4) or (h.L.bits <> 8) or not HdrFits(h.L.width, h.L.height, h.L.dataLength) then Exit(dsBadStream);
+    h.L.rowBytes := h.L.width * 4;
+    SetLength(h.modes, h.L.height);
+    y := 0;
+    while src.ok and (y < h.L.height) do begin
+      m := src.Get;
+      run := src.GetVarint(h.L.height - y);
+      if (m > HDR_STB) or (run < 1) then Exit(dsBadStream);
+      for k := 0 to Integer(run) - 1 do h.modes[y + k] := m;
+      Inc(y, run);
+    end;
+  end;
+  h.tailLen := src.GetVarint(High(Int64) shr 1);
+  if not src.ok or (flags > 7) or (h.tailLen > Length(s) - src.p) then Exit(dsBadStream);
+  h.tailSrc := src.p; Inc(src.p, h.tailLen);
+  h.L.bigEndian := (flags and 1) <> 0;
+  h.L.isFloat := (flags and 2) <> 0;
+  h.L.bottomUp := (flags and 4) <> 0;
+  h.L.dataOffset := hdrLen;
+  { the limits, before anything is decoded: the pixels have to fit in maxOut }
+  if hdrLen + h.tailLen > maxOut then Exit(dsTooBig);
+  if h.L.format = rfHDR then begin
+    if h.L.dataLength > maxOut - hdrLen - h.tailLen then Exit(dsTooBig);
+  end else
+    case SizeRows(h.L, maxOut - hdrLen - h.tailLen) of
+      psOk: ;
+      psTruncated: Exit(dsTooBig);
+    else Exit(dsBadStream);
+    end;
+  if not Codable(h.L) then Exit(dsBadStream);
+  if HasMode(h.L) then begin
+    h.mode := src.Get;
+    if not src.ok or (h.mode > MODE_INDICES) then Exit(dsBadStream);
+  end;
+  h.pixFirst := src.p;
+  Result := dsOk;
+end;
+
+{ ---------- verifying while encoding ---------- }
+
+type
+  { Decodes the pixels from the encoder's bytes as they come out (a
+    TLiveStream), on its own thread: the check runs beside the encoding.
+    A bare thread (BeginThread, WaitForThreadTerminate): TThread.WaitFor
+    called from the main thread waits in steps of 100 ms in FreePascal 3.2,
+    which made every small file 100 ms slower (measured 01/11/2026). }
+  TVerifier = record
+    live: TLiveStream;
+    L: TRasterLayout;
+    mode: Integer;
+    back: TBytes;
+    failed: Boolean;
+  end;
+  PVerifier = ^TVerifier;
+
+function VerifierRun(p: Pointer): PtrInt;
+var v: PVerifier; pc: TPixelCoder;
+begin
+  v := p;
+  v^.failed := False;
+  try
+    pc.encoding := False;
+    InitCoder(pc, v^.L);
+    pc.dec.InitLive(v^.live);
+    if v^.L.bits = 1 then CodeBits(pc, v^.back, v^.L)
+    else if v^.mode = MODE_INDICES then CodeIndices(pc, v^.back, v^.L)
+    else CodeSamples(pc, v^.back, v^.L);
+  except
+    v^.failed := True;
+  end;
+  Result := 0;
+end;
+
+function EncodePixelsLive(const d: TBytes; const L: TRasterLayout; mode: Integer; live: TLiveStream): TBytes;
+var pc: TPixelCoder; dd: TBytes;
+begin
+  pc.encoding := True;
+  InitCoder(pc, L);
+  pc.enc.InitLive(live);
+  dd := d;
+  try
+    if L.bits = 1 then CodeBits(pc, dd, L)
+    else if mode = MODE_INDICES then CodeIndices(pc, dd, L)
+    else CodeSamples(pc, dd, L);
+  except
+    { the reader must not wait for bytes that will never come }
+    live.Finish;
+    raise;
+  end;
+  Result := pc.enc.Finish;
+end;
+
+{ ---------- the stream ---------- }
+
+function SameBytes(const a: TBytes; aFirst: SizeInt; const b: TBytes; bFirst, len: SizeInt): Boolean;
+begin
+  if (len < 0) or (aFirst < 0) or (bFirst < 0) or (aFirst + len > Length(a)) or (bFirst + len > Length(b)) then Exit(False);
+  Result := (len = 0) or CompareMem(@a[aFirst], @b[bFirst], len);
+end;
+
+function EncodeFile(const d: TBytes; out s: TBytes; out why: string): Boolean;
+var
+  L, Lp, Lt: TRasterLayout; st: TParseStatus; o: TSink; tailFirst, used, trialRows: Int64; flags: Byte;
+  px, alt, rgbe, modes, prefix, lines, back: TBytes; y, run, m: Integer; v: TVerifier; live: TLiveStream;
+  h: TStreamHead; ok: Boolean; tid: TThreadID;
+begin
+  s := nil; why := '';
+  st := ParseAny(d, L);
+  if st <> psOk then begin why := StatusName(st); Exit(False); end;
+  if not Codable(L) then begin why := 'layout not handled by this version'; Exit(False); end;
+  { everything before the pixels }
   o.Init;
   o.Put(STREAM_VERSION);
   o.PutVarint(L.dataOffset);
@@ -710,9 +857,10 @@ begin
   if L.bottomUp then flags := flags or 4;
   o.Put(flags);
   o.PutVarint(L.maxval);
+  rgbe := nil; modes := nil;
   if L.format = rfHDR then begin
     { the scanlines' length, and each line's coder, as runs of one mode }
-    if HdrDecode(d, L, rgbe, modes, used) <> psOk then Exit(nil);
+    if HdrDecode(d, L, rgbe, modes, used) <> psOk then begin why := 'HDR scanlines'; Exit(False); end;
     o.PutVarint(L.dataLength);
     y := 0;
     while y < L.height do begin
@@ -725,125 +873,84 @@ begin
   tailFirst := L.dataOffset + L.dataLength;
   o.PutVarint(Length(d) - tailFirst);
   o.PutBytes(d, tailFirst, Length(d) - tailFirst);
-  if L.format = rfHDR then px := EncodePixels(rgbe, RgbeLayout(L))
-  else if HasMode(L) then begin
+  { what the pixel coder codes: the file's pixels, or an HDR file's RGBE }
+  m := MODE_SAMPLES;
+  if L.format = rfHDR then begin Lp := RgbeLayout(L); px := rgbe; end
+  else begin Lp := L; px := d; end;
+  alt := nil;
+  if HasMode(L) then begin
     { both ways, and the smaller one: on the whole image when it is small,
       on its first rows (at least TRIAL_SAMPLES) otherwise. Only the
       encoder chooses; the decoder reads the mode byte. }
-    Lp := L;
     trialRows := (TRIAL_SAMPLES + L.rowBytes * 8 div L.bits - 1) div (L.rowBytes * 8 div L.bits);
-    if trialRows < L.height then begin
-      Lp.height := trialRows;
-      if Length(EncodePixels(d, Lp, MODE_INDICES)) < Length(EncodePixels(d, Lp, MODE_SAMPLES)) then
-        m := MODE_INDICES
-      else m := MODE_SAMPLES;
-      o.Put(m);
-      px := EncodePixels(d, L, m);
-    end else begin
-      px := EncodePixels(d, L, MODE_SAMPLES);
-      alt := EncodePixels(d, L, MODE_INDICES);
-      if Length(alt) < Length(px) then begin o.Put(MODE_INDICES); px := alt; end
-      else o.Put(MODE_SAMPLES);
-    end;
-  end else px := EncodePixels(d, L);
-  o.PutBytes(px, 0, Length(px));
-  Result := o.Done;
-end;
-
-function EncodeFile(const d: TBytes; out s: TBytes; out why: string): Boolean;
-var L: TRasterLayout; st: TParseStatus; back: TBytes;
-begin
-  s := nil;
-  st := ParseAny(d, L);
-  if st <> psOk then begin why := StatusName(st); Exit(False); end;
-  if not Codable(L) then begin why := 'layout not handled by this version'; Exit(False); end;
-  s := EncodeOnly(d, L);
-  { the one guarantee: it has to come back }
-  if (DecodeFile(s, Length(d), back) <> dsOk) or (Length(back) <> Length(d))
-     or ((Length(d) > 0) and not CompareMem(@back[0], @d[0], Length(d))) then begin
-    s := nil; why := 'did not come back the same'; Exit(False);
+    Lt := L;
+    if trialRows < L.height then Lt.height := trialRows;
+    if Length(EncodePixels(d, Lt, MODE_INDICES)) < Length(EncodePixels(d, Lt, MODE_SAMPLES)) then m := MODE_INDICES;
+    o.Put(m);
   end;
-  why := '';
+  prefix := o.Done;
+  { the pixels, and their check beside them: a second thread decodes the
+    coder's bytes as they come out }
+  back := nil; SetLength(back, Length(px));
+  live := TLiveStream.Create;
+  try
+    v.live := live; v.L := Lp; v.mode := m; v.back := back; v.failed := True;
+    tid := BeginThread(@VerifierRun, @v);
+    try
+      alt := EncodePixelsLive(px, Lp, m, live);
+    finally
+      WaitForThreadTerminate(tid, 0);
+      CloseThread(tid);
+    end;
+    ok := not v.failed;
+    back := v.back;
+  finally
+    live.Free;
+  end;
+  { the one guarantee: it has to come back. The pixels first ... }
+  if ok then
+    if L.format = rfHDR then begin
+      lines := HdrEncode(back, modes, L);
+      ok := (Length(lines) = L.dataLength) and SameBytes(lines, 0, d, L.dataOffset, L.dataLength);
+    end else
+      ok := SameBytes(back, L.dataOffset, d, L.dataOffset, L.dataLength);
+  { ... then everything else, read back from the stream as the decoder reads it }
+  if ok then begin
+    s := prefix;
+    SetLength(s, Length(prefix) + Length(alt));
+    if Length(alt) > 0 then Move(alt[0], s[Length(prefix)], Length(alt));
+    ok := (ReadStream(s, Length(d), h) = dsOk) and (h.pixFirst = Length(prefix)) and (h.mode = m)
+      and (h.L.format = L.format) and (h.L.width = L.width) and (h.L.height = L.height)
+      and (h.L.channels = L.channels) and (h.L.bits = L.bits) and (h.L.bigEndian = L.bigEndian)
+      and (h.L.isFloat = L.isFloat) and (h.L.dataOffset = L.dataOffset) and (h.L.dataLength = L.dataLength)
+      and (h.L.dataOffset + h.L.dataLength + h.tailLen = Length(d))
+      and SameBytes(s, h.hdrFirst, d, 0, L.dataOffset)
+      and SameBytes(s, h.tailSrc, d, tailFirst, h.tailLen)
+      and ((L.format <> rfHDR) or SameBytes(h.modes, 0, modes, 0, L.height));
+  end;
+  if not ok then begin s := nil; why := 'did not come back the same'; Exit(False); end;
   Result := True;
 end;
 
 function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes): TDecodeStatus;
-var
-  src: TSource; L: TRasterLayout; hdrLen, tailLen, tailFirst, run, y: Int64; flags, f, ver, m, k: Integer;
-  hdrFirst, tailSrc: SizeInt; modes, rgbe, lines: TBytes;
+var h: TStreamHead; rgbe, lines: TBytes; tailFirst: Int64;
 begin
   d := nil;
-  if Length(s) = 0 then Exit(dsEmpty);
-  src.b := s; src.p := 0; src.ok := True;
-  ver := src.Get;
-  if ver > STREAM_VERSION then Exit(dsFutureVersion);
-  if ver <> 1 then Exit(dsBadStream);
-  L.Clear;
-  hdrLen := src.GetVarint(MAX_TEXT_HEADER);
-  if not src.ok or (hdrLen > Length(s) - src.p) then Exit(dsBadStream);
-  hdrFirst := src.p; Inc(src.p, hdrLen);
-  f := src.Get;
-  if (f <= Ord(Low(TRasterFormat))) or (f > Ord(High(TRasterFormat))) then Exit(dsBadStream);
-  L.format := TRasterFormat(f);
-  L.width := src.GetVarint(MAX_DIMENSION);
-  L.height := src.GetVarint(MAX_DIMENSION);
-  L.channels := src.GetVarint(MAX_CHANNELS);
-  L.bits := src.Get;
-  flags := src.Get;
-  L.maxval := src.GetVarint(High(Cardinal));
-  modes := nil;
-  if L.format = rfHDR then begin
-    { the scanlines' length within the cap, and the image within what that
-      length can hold, before anything is allocated }
-    L.dataLength := src.GetVarint(maxOut);
-    if not src.ok then Exit(dsBadStream);
-    if (L.channels <> 4) or (L.bits <> 8) or not HdrFits(L.width, L.height, L.dataLength) then Exit(dsBadStream);
-    L.rowBytes := L.width * 4;
-    SetLength(modes, L.height);
-    y := 0;
-    while src.ok and (y < L.height) do begin
-      m := src.Get;
-      run := src.GetVarint(L.height - y);
-      if (m > HDR_STB) or (run < 1) then Exit(dsBadStream);
-      for k := 0 to Integer(run) - 1 do modes[y + k] := m;
-      Inc(y, run);
-    end;
-  end;
-  tailLen := src.GetVarint(High(Int64) shr 1);
-  if not src.ok or (flags > 7) or (tailLen > Length(s) - src.p) then Exit(dsBadStream);
-  tailSrc := src.p; Inc(src.p, tailLen);
-  L.bigEndian := (flags and 1) <> 0;
-  L.isFloat := (flags and 2) <> 0;
-  L.bottomUp := (flags and 4) <> 0;
-  L.dataOffset := hdrLen;
-  { the limits, before anything is decoded: the pixels have to fit in maxOut }
-  if hdrLen + tailLen > maxOut then Exit(dsTooBig);
-  if L.format = rfHDR then begin
-    if L.dataLength > maxOut - hdrLen - tailLen then Exit(dsTooBig);
-  end else
-    case SizeRows(L, maxOut - hdrLen - tailLen) of
-      psOk: ;
-      psTruncated: Exit(dsTooBig);
-    else Exit(dsBadStream);
-    end;
-  if not Codable(L) then Exit(dsBadStream);
-  SetLength(d, hdrLen + L.dataLength + tailLen);
-  if hdrLen > 0 then Move(s[hdrFirst], d[0], hdrLen);
-  tailFirst := hdrLen + L.dataLength;
-  if tailLen > 0 then Move(s[tailSrc], d[tailFirst], tailLen);
-  if L.format = rfHDR then begin
+  Result := ReadStream(s, maxOut, h);
+  if Result <> dsOk then Exit;
+  SetLength(d, h.L.dataOffset + h.L.dataLength + h.tailLen);
+  if h.L.dataOffset > 0 then Move(s[h.hdrFirst], d[0], h.L.dataOffset);
+  tailFirst := h.L.dataOffset + h.L.dataLength;
+  if h.tailLen > 0 then Move(s[h.tailSrc], d[tailFirst], h.tailLen);
+  if h.L.format = rfHDR then begin
     { the RGBE pixels, then the scanlines coded again, line by line }
-    rgbe := nil; SetLength(rgbe, L.width * L.height * 4);
-    DecodePixels(s, src.p, rgbe, RgbeLayout(L));
-    lines := HdrEncode(rgbe, modes, L);
-    if Length(lines) <> L.dataLength then begin d := nil; Exit(dsBadStream); end;
-    if Length(lines) > 0 then Move(lines[0], d[hdrLen], Length(lines));
-  end else if HasMode(L) then begin
-    m := src.Get;
-    if not src.ok or (m > MODE_INDICES) then begin d := nil; Exit(dsBadStream); end;
-    DecodePixels(s, src.p, d, L, m);
+    rgbe := nil; SetLength(rgbe, h.L.width * h.L.height * 4);
+    DecodePixels(s, h.pixFirst, rgbe, RgbeLayout(h.L));
+    lines := HdrEncode(rgbe, h.modes, h.L);
+    if Length(lines) <> h.L.dataLength then begin d := nil; Exit(dsBadStream); end;
+    if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
   end else
-    DecodePixels(s, src.p, d, L);
+    DecodePixels(s, h.pixFirst, d, h.L, h.mode);
   Result := dsOk;
 end;
 

@@ -5,7 +5,7 @@
     test_format <directory> [directory...]     (tests/pnm) }
 program test_format;
 {$I ../pra.inc}
-uses SysUtils, Classes, pralimits, prablake3, praformat, prapack;
+uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, pralimits, prablake3, praformat, prapack;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);

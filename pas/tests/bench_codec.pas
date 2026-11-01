@@ -3,7 +3,7 @@
   codec does not take at its own size. }
 program bench_codec;
 {$I ../pra.inc}
-uses SysUtils, Classes, DateUtils, pracodec;
+uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, DateUtils, pracodec;
 
 function ReadFile(const name: string): TBytes;
 var fs: TFileStream;
