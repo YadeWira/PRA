@@ -25,7 +25,7 @@ done
 "$OUT/t/test_model$EXE" | tail -1
 "$OUT/t/test_pnm$EXE" | tail -1
 "$OUT/t/test_parsers$EXE" tests/bmp tests/hdr tests/other | tail -1
-"$OUT/t/test_codec$EXE" | tail -2
+"$OUT/t/test_codec$EXE" tests/bmp tests/hdr tests/other | tail -2
 "$OUT/t/test_format$EXE" tests/pnm tests/bmp tests/hdr tests/other | tail -1
 
 echo "== the command"

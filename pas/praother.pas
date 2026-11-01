@@ -4,13 +4,13 @@
 
   - farbfeld: "farbfeld", width and height (32-bit big-endian), then RGBA,
     16 bits a sample, big-endian.
-  - TGA: an 18-byte header, an ID field and a colour map, then the pixels:
+  - TGA: an 18-byte header, an ID field and a colour map, then the pixels,
+    as they are (types 1, 2, 3) or run-length coded (9, 10, 11: prarle):
     colour-mapped (type 1) or grey (type 3) at 8 bits, true colour (type 2)
     at 16 (one little-endian sample: the bits are 5-5-5), 24 (B, G, R) or
     32 (B, G, R, A). There is no magic number: the header has to be
     plausible and the pixels have to fit. What follows the pixels (TGA 2.0's
-    extension area and footer) is the tail. The run-length types (9, 10,
-    11) are psUnsupported here.
+    extension area and footer) is the tail.
   - Sun Raster: magic 59A66A95, a 32-byte header and a colour map; rows
     padded to 16 bits; depth 1, 8, 24 (B, G, R; R, G, B for type 3) or 32
     (a pad byte, then the three). The run-length type (2) is psUnsupported
@@ -35,7 +35,7 @@ function ParseWbmp(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses pralimits;
+uses pralimits, prarle;
 
 function U16LE(const d: TBytes; i: SizeInt): Int64;
 begin Result := d[i] or (d[i + 1] shl 8); end;
@@ -70,7 +70,7 @@ end;
 { ---------- TGA ---------- }
 
 function ParseTga(const d: TBytes; out L: TRasterLayout): TParseStatus;
-var idLen, cmType, imgType, cmFirst, cmLen, cmBits, w, h, bpp, desc, cmBytes: Int64;
+var idLen, cmType, imgType, cmFirst, cmLen, cmBits, w, h, bpp, desc, cmBytes, used: Int64;
 begin
   L.Clear;
   if Length(d) < 18 then Exit(psNotThis);
@@ -84,7 +84,6 @@ begin
   if (imgType in [1, 9]) <> (cmType = 1) then Exit(psNotThis);  { a colour map with its type }
   if (cmType = 1) and not (cmBits in [15, 16, 24, 32]) then Exit(psNotThis);
   if (cmType = 0) and ((cmFirst <> 0) or (cmLen <> 0)) and (cmBits = 0) then ;  { tolerated }
-  if imgType >= 9 then Exit(psUnsupported);                    { run-length coded }
   if cmType = 1 then cmBytes := cmLen * ((cmBits + 7) div 8) else cmBytes := 0;
   L.format := rfTGA;
   L.width := w; L.height := h;
@@ -100,6 +99,15 @@ begin
   L.maxval := (Int64(1) shl L.bits) - 1;
   L.dataOffset := 18 + idLen + cmBytes;
   if L.dataOffset > Length(d) then begin L.format := rfNone; Exit(psTruncated); end;
+  if imgType >= 9 then begin
+    { run-length coded (prarle): the packets' length, walking them }
+    L.coding := CODING_TGA_RLE;
+    Result := SizeRows(L, High(Int64) shr 2);
+    if Result = psOk then Result := TgaRleLength(d, L.dataOffset, L.width, L.height, (bpp + 7) div 8, used);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+    L.dataLength := used;
+    Exit(psOk);
+  end;
   Result := Finish(d, L);
 end;
 

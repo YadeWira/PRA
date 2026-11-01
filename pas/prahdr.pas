@@ -92,7 +92,7 @@ begin
      and ((parts[2] = '-Y') or (parts[2] = '+Y') or (parts[2] = '-X') or (parts[2] = '+X'))) then Exit(psMalformed);
   if not TryStrToInt64(parts[1], h) or not TryStrToInt64(parts[3], w) then Exit(psMalformed);
   if (parts[0] <> '-Y') or (parts[2] <> '+X') then Exit(psUnsupported);
-  L.format := rfHDR;
+  L.format := rfHDR; L.coding := CODING_HDR;
   L.width := w; L.height := h; L.channels := 4; L.bits := 8; L.maxval := 255;
   L.dataOffset := p;
   { the size limits, and the decoded pixels have to fit in the limits too }

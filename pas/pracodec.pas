@@ -63,7 +63,7 @@ function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle;
 
 { ---------- byte sink and source ---------- }
 
@@ -703,12 +703,20 @@ begin
   if Result then Result := L.rowBytes * 8 >= L.width * L.channels * L.bits;
 end;
 
-{ an HDR file's pixels: the layout of its decoded RGBE, as an image of its own }
-function RgbeLayout(const L: TRasterLayout): TRasterLayout;
+{ bytes a pixel of a coded file's raw pixels }
+function PixelBytes(const L: TRasterLayout): Integer;
+begin
+  Result := (L.channels * L.bits + 7) div 8;
+end;
+
+{ a coded file's pixels (an HDR file's RGBE, a TGA's decoded packets): the
+  layout of the raw pixels, as an image of its own }
+function RawLayout(const L: TRasterLayout): TRasterLayout;
 begin
   Result := L;
+  Result.coding := CODING_RAW;
   Result.dataOffset := 0;
-  Result.rowBytes := L.width * 4;
+  Result.rowBytes := L.width * PixelBytes(L);
   Result.dataLength := Result.rowBytes * L.height;
 end;
 
@@ -719,6 +727,7 @@ type
   TStreamHead = record
     L: TRasterLayout;
     modes: TBytes;                 { HDR: each line's coder }
+    side: TBytes;                  { TGA run-length: the packets, coded }
     mode: Integer;                 { one channel of 2-8 bits: samples or indices }
     hdrFirst, tailSrc, pixFirst: SizeInt;
     tailLen: Int64;
@@ -728,9 +737,9 @@ type
 
 function ReadStream(const s: TBytes; maxOut: Int64; out h: TStreamHead): TDecodeStatus;
 var
-  src: TSource; hdrLen, run, y, rest: Int64; flags, f, ver, m, k: Integer; Lp: TRasterLayout;
+  src: TSource; hdrLen, run, y, rest, sideLen: Int64; flags, f, ver, m, k: Integer; Lp: TRasterLayout;
 begin
-  h.modes := nil; h.mode := MODE_SAMPLES; h.L.Clear;
+  h.modes := nil; h.side := nil; h.mode := MODE_SAMPLES; h.L.Clear;
   h.bands := 0; h.bandFirst := nil; h.bandLen := nil;
   h.hdrFirst := 0; h.tailSrc := 0; h.pixFirst := 0; h.tailLen := 0;
   if Length(s) = 0 then Exit(dsEmpty);
@@ -750,7 +759,24 @@ begin
   h.L.bits := src.Get;
   flags := src.Get;
   h.L.maxval := src.GetVarint(High(Cardinal));
-  if h.L.format = rfHDR then begin
+  if not src.ok or (flags > 15) then Exit(dsBadStream);
+  if h.L.format = rfHDR then h.L.coding := CODING_HDR
+  else if (flags and 8) <> 0 then begin
+    if h.L.format <> rfTGA then Exit(dsBadStream);
+    h.L.coding := CODING_TGA_RLE;
+  end;
+  if h.L.coding = CODING_TGA_RLE then begin
+    { the packets' length within the cap, the image within what that length
+      can hold, and the packets' choices }
+    h.L.dataLength := src.GetVarint(maxOut);
+    sideLen := src.GetVarint(Length(s));
+    if not src.ok or (sideLen > Length(s) - src.p) then Exit(dsBadStream);
+    if not TgaRleFits(h.L.width, h.L.height, PixelBytes(h.L), h.L.dataLength) then Exit(dsBadStream);
+    h.side := Copy(s, src.p, sideLen);
+    Inc(src.p, sideLen);
+    h.L.rowBytes := h.L.width * PixelBytes(h.L);
+  end;
+  if h.L.coding = CODING_HDR then begin
     { the scanlines' length within the cap, and the image within what that
       length can hold, before anything is allocated }
     h.L.dataLength := src.GetVarint(maxOut);
@@ -768,7 +794,7 @@ begin
     end;
   end;
   h.tailLen := src.GetVarint(High(Int64) shr 1);
-  if not src.ok or (flags > 7) or (h.tailLen > Length(s) - src.p) then Exit(dsBadStream);
+  if not src.ok or (h.tailLen > Length(s) - src.p) then Exit(dsBadStream);
   h.tailSrc := src.p; Inc(src.p, h.tailLen);
   h.L.bigEndian := (flags and 1) <> 0;
   h.L.isFloat := (flags and 2) <> 0;
@@ -776,7 +802,7 @@ begin
   h.L.dataOffset := hdrLen;
   { the limits, before anything is decoded: the pixels have to fit in maxOut }
   if hdrLen + h.tailLen > maxOut then Exit(dsTooBig);
-  if h.L.format = rfHDR then begin
+  if h.L.coding <> CODING_RAW then begin
     if h.L.dataLength > maxOut - hdrLen - h.tailLen then Exit(dsTooBig);
   end else
     case SizeRows(h.L, maxOut - hdrLen - h.tailLen) of
@@ -790,7 +816,7 @@ begin
     if not src.ok or (h.mode > MODE_INDICES) then Exit(dsBadStream);
   end;
   { the bands: how many, and how long each one but the last is }
-  if h.L.format = rfHDR then Lp := RgbeLayout(h.L) else Lp := h.L;
+  if h.L.coding <> CODING_RAW then Lp := RawLayout(h.L) else Lp := h.L;
   h.bands := src.GetVarint(MAX_BANDS);
   if not src.ok or (h.bands < 1) or (h.bands > Lp.height) then Exit(dsBadStream);
   SetLength(h.bandFirst, h.bands); SetLength(h.bandLen, h.bands);
@@ -1001,7 +1027,7 @@ end;
 function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: Integer): Boolean;
 var
   L, Lp, Lt: TRasterLayout; st: TParseStatus; o: TSink; tailFirst, used, trialRows: Int64; flags: Byte;
-  px, rgbe, modes, prefix, lines, back: TBytes; y, run, m, k: Integer; at: SizeInt;
+  px, rgbe, modes, side, prefix, lines, back: TBytes; y, run, m, k: Integer; at: SizeInt;
   h: TStreamHead; ok: Boolean; eb: TEncodeBands;
 begin
   s := nil; why := '';
@@ -1020,10 +1046,18 @@ begin
   if L.bigEndian then flags := flags or 1;
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
+  if L.coding = CODING_TGA_RLE then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
-  rgbe := nil; modes := nil;
-  if L.format = rfHDR then begin
+  rgbe := nil; modes := nil; side := nil;
+  if L.coding = CODING_TGA_RLE then begin
+    { the packets' length and their choices; the pixels go to the pixel coder }
+    if TgaRleScan(d, L, PixelBytes(L), rgbe, side, used) <> psOk then begin why := 'TGA packets'; Exit(False); end;
+    o.PutVarint(L.dataLength);
+    o.PutVarint(Length(side));
+    o.PutBytes(side, 0, Length(side));
+  end;
+  if L.coding = CODING_HDR then begin
     { the scanlines' length, and each line's coder, as runs of one mode }
     if HdrDecode(d, L, rgbe, modes, used) <> psOk then begin why := 'HDR scanlines'; Exit(False); end;
     o.PutVarint(L.dataLength);
@@ -1038,18 +1072,19 @@ begin
   tailFirst := L.dataOffset + L.dataLength;
   o.PutVarint(Length(d) - tailFirst);
   o.PutBytes(d, tailFirst, Length(d) - tailFirst);
-  { what the pixel coder codes: the file's pixels, or an HDR file's RGBE }
+  { what the pixel coder codes: the file's pixels, or a coded file's raw
+    pixels (an HDR file's RGBE, a TGA's decoded packets) }
   m := MODE_SAMPLES;
-  if L.format = rfHDR then begin Lp := RgbeLayout(L); px := rgbe; end
+  if L.coding <> CODING_RAW then begin Lp := RawLayout(L); px := rgbe; end
   else begin Lp := L; px := d; end;
-  if HasMode(L) then begin
+  if HasMode(Lp) then begin
     { both ways, and the smaller one: on the whole image when it is small,
       on its first rows (at least TRIAL_SAMPLES) otherwise. Only the
       encoder chooses; the decoder reads the mode byte. }
-    trialRows := (TRIAL_SAMPLES + L.rowBytes * 8 div L.bits - 1) div (L.rowBytes * 8 div L.bits);
-    Lt := L;
-    if trialRows < L.height then Lt.height := trialRows;
-    if Length(EncodePixels(d, Lt, MODE_INDICES)) < Length(EncodePixels(d, Lt, MODE_SAMPLES)) then m := MODE_INDICES;
+    trialRows := (TRIAL_SAMPLES + Lp.rowBytes * 8 div Lp.bits - 1) div (Lp.rowBytes * 8 div Lp.bits);
+    Lt := Lp;
+    if trialRows < Lp.height then Lt.height := trialRows;
+    if Length(EncodePixels(px, Lt, MODE_INDICES)) < Length(EncodePixels(px, Lt, MODE_SAMPLES)) then m := MODE_INDICES;
     o.Put(m);
   end;
   { the bands }
@@ -1071,9 +1106,12 @@ begin
   prefix := o.Done;
   { the one guarantee: it has to come back. The pixels first ... }
   if ok then
-    if L.format = rfHDR then begin
+    if L.coding = CODING_HDR then begin
       lines := HdrEncode(back, modes, L);
       ok := (Length(lines) = L.dataLength) and SameBytes(lines, 0, d, L.dataOffset, L.dataLength);
+    end else if L.coding = CODING_TGA_RLE then begin
+      ok := TgaRleRebuild(back, side, L, PixelBytes(L), L.dataLength, lines)
+        and SameBytes(lines, 0, d, L.dataOffset, L.dataLength);
     end else
       ok := SameBytes(back, L.dataOffset, d, L.dataOffset, L.dataLength);
   { ... then everything else, read back from the stream as the decoder reads it }
@@ -1092,7 +1130,9 @@ begin
       and (h.L.dataOffset + h.L.dataLength + h.tailLen = Length(d))
       and SameBytes(s, h.hdrFirst, d, 0, L.dataOffset)
       and SameBytes(s, h.tailSrc, d, tailFirst, h.tailLen)
-      and ((L.format <> rfHDR) or SameBytes(h.modes, 0, modes, 0, L.height));
+      and (h.L.coding = L.coding)
+      and ((L.coding <> CODING_HDR) or SameBytes(h.modes, 0, modes, 0, L.height))
+      and (Length(h.side) = Length(side)) and SameBytes(h.side, 0, side, 0, Length(side));
   end;
   if not ok then begin s := nil; why := 'did not come back the same'; Exit(False); end;
   Result := True;
@@ -1110,9 +1150,9 @@ begin
   if h.tailLen > 0 then Move(s[h.tailSrc], d[tailFirst], h.tailLen);
   { the bands, each from its own bytes, into the pixels (or an HDR file's RGBE) }
   db.n := h.bands; db.mode := h.mode;
-  if h.L.format = rfHDR then begin
-    db.Lp := RgbeLayout(h.L);
-    rgbe := nil; SetLength(rgbe, h.L.width * h.L.height * 4);
+  if h.L.coding <> CODING_RAW then begin
+    db.Lp := RawLayout(h.L);
+    rgbe := nil; SetLength(rgbe, db.Lp.dataLength);
     db.out_ := rgbe;
   end else begin
     db.Lp := h.L;
@@ -1124,10 +1164,16 @@ begin
   RunJobs(db.n, threads, @DecodeBandJob, @db);
   for k := 0 to db.n - 1 do
     if db.failed[k] then begin d := nil; Exit(dsBadStream); end;
-  if h.L.format = rfHDR then begin
+  if h.L.coding = CODING_HDR then begin
     { the scanlines coded again, line by line }
     lines := HdrEncode(db.out_, h.modes, h.L);
     if Length(lines) <> h.L.dataLength then begin d := nil; Exit(dsBadStream); end;
+    if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
+  end else if h.L.coding = CODING_TGA_RLE then begin
+    { the packets again, from the pixels and their choices }
+    if not TgaRleRebuild(db.out_, h.side, h.L, PixelBytes(h.L), h.L.dataLength, lines) then begin
+      d := nil; Exit(dsBadStream);
+    end;
     if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
   end;
   Result := dsOk;

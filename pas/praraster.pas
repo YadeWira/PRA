@@ -40,6 +40,14 @@ type
     psTruncated,     { the header promises more pixel data than the file has }
     psUnsupported);  { a valid variant this version does not handle }
 
+const
+  { how the file stores its pixels: as they are, or run-length coded
+    (dataLength is then the coded length, and the codec decodes them) }
+  CODING_RAW = 0;
+  CODING_HDR = 1;       { Radiance's scanlines (prahdr) }
+  CODING_TGA_RLE = 2;   { TGA types 9, 10, 11 (prarle) }
+
+type
   TRasterLayout = record
     format: TRasterFormat;
     width, height: Int64;         { pixels }
@@ -51,6 +59,7 @@ type
     bottomUp: Boolean;            { the first row is the image's bottom }
     rowBytes: Int64;
     dataOffset, dataLength: Int64;
+    coding: Integer;
     procedure Clear;
   end;
 
@@ -70,7 +79,7 @@ procedure TRasterLayout.Clear;
 begin
   format := rfNone; width := 0; height := 0; channels := 0; bits := 0; maxval := 0;
   bigEndian := True; isFloat := False; bottomUp := False;
-  rowBytes := 0; dataOffset := 0; dataLength := 0;
+  rowBytes := 0; dataOffset := 0; dataLength := 0; coding := CODING_RAW;
 end;
 
 function FormatName(f: TRasterFormat): string;
@@ -106,7 +115,7 @@ function SizeRows(var L: TRasterLayout; available: Int64): TParseStatus;
 var bitsPerRow: Int64;
 begin
   if (L.width < 1) or (L.height < 1) or (L.width > MAX_DIMENSION) or (L.height > MAX_DIMENSION)
-     or (L.channels < 1) or (L.channels > MAX_CHANNELS) then Exit(psMalformed);
+     or (L.channels < 1) or (L.channels > MAX_CHANNELS) or (L.bits < 1) or (L.bits > 32) then Exit(psMalformed);
   { width <= 2^24, channels <= 2^8, bits <= 32: at most 2^37, no overflow }
   bitsPerRow := L.width * L.channels * L.bits;
   { rows padded: BMP to 4 bytes, Sun Raster to 2 }

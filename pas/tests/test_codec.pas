@@ -11,7 +11,7 @@
     with and without PRA_FAST and demands the same line. }
 program test_codec;
 {$I ../pra.inc}
-uses {$ifdef UNIX} cthreads, {$endif} SysUtils, prablake3, praraster, pracodec;
+uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, prablake3, praraster, pracodec;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
@@ -99,6 +99,10 @@ begin
   Append(Result, px);
 end;
 
+function ReadAll(const f: string): TBytes; var fs: TFileStream;
+begin fs := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, fs.Size);
+  if fs.Size > 0 then fs.ReadBuffer(Result[0], fs.Size); finally fs.Free; end; end;
+
 function Same(const a, b: TBytes): Boolean;
 begin
   Result := (Length(a) = Length(b)) and ((Length(a) = 0) or CompareMem(@a[0], @b[0], Length(a)));
@@ -120,7 +124,7 @@ begin Result := ''; for i := 0 to High(x) do Result := Result + LowerCase(IntToH
 
 var
   i, k, n, bad, raised: Integer; s, s2, back, dmg: TBytes; why: string; st: TDecodeStatus; ok: Boolean;
-  L: TRasterLayout; streams: array of TBytes;
+  L: TRasterLayout; streams: array of TBytes; sr: TSearchRec;
 begin
   cells := 0; failures := 0; seed := 2463534242;
   samples := nil; names := nil;
@@ -151,8 +155,17 @@ begin
   for k := 13 to High(s) do s[k] := Byte(Rand);
   Add('PGM of pure noise', s);
 
+  { and every sample file of the directories given }
+  for k := 1 to ParamCount do
+    if FindFirst(ParamStr(k) + '/*', faAnyFile, sr) = 0 then begin
+      repeat
+        if (sr.Attr and faDirectory) = 0 then Add(sr.Name, ReadAll(ParamStr(k) + '/' + sr.Name));
+      until FindNext(sr) <> 0;
+      FindClose(sr);
+    end;
+
   Writeln('round trips');
-  all.Init;
+  all.Init; bad := 0;
   for i := 0 to High(samples) do begin
     ok := EncodeFile(samples[i], s, why);
     if ok then begin
@@ -162,8 +175,11 @@ begin
       ok := ok and Same(s, s2);
       all.Update(s[0], Length(s));
     end;
-    Check(ok, Format('%s: %d -> %d, back, same stream twice', [names[i], Length(samples[i]), Length(s)]));
+    if i < 22 then
+      Check(ok, Format('%s: %d -> %d, back, same stream twice', [names[i], Length(samples[i]), Length(s)]))
+    else if not ok then begin Inc(bad); Writeln('  ', names[i], ': did not come back  FAIL'); end;
   end;
+  Check(bad = 0, Format('%d sample files: back, same stream twice', [Length(samples) - 22]));
 
   Writeln('bands');
   { the encoder's bands made small (BandBytes), so that these images come
@@ -231,10 +247,13 @@ begin
       st := DecodeFile(dmg, n, back);
       if (st = dsOk) and (Length(back) > n) then Inc(bad);
     except
-      Inc(raised);
+      on e: Exception do begin
+        Inc(raised);
+        Writeln('  ', names[i mod Length(samples)], ': ', e.ClassName, ': ', e.Message);
+      end;
     end;
   end;
-  Check((bad = 0) and (raised = 0), Format('3000 damaged streams: no exception (%d), nothing over the cap (%d)', [raised, bad]));
+  Check((bad = 0) and (raised = 0), Format('3000 damaged streams of every sample: no exception (%d), nothing over the cap (%d)', [raised, bad]));
   bad := 0;
   for i := 1 to 2000 do begin
     SetLength(dmg, 1 + Integer(Rand mod 60));

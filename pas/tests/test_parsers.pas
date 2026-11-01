@@ -188,12 +188,25 @@ begin
   Check((st = psOk) and (L.format = rfWBMP) and (L.width = 200) and (L.dataOffset = 5), 'wbmp_wide.wbmp: width 200 in two bytes');
   d := ReadAll(dirO + '/tga_gray8.tga');
   ExpectTga(WithU16(d, 12, 0), psNotThis, 'TGA, width 0');
-  d[2] := 10; ExpectTga(d, psUnsupported, 'TGA, run-length (type 10)');
   d[2] := 7; ExpectTga(d, psNotThis, 'TGA, type 7');
   d := ReadAll(dirO + '/tga_gray8.tga'); d[16] := 12;
   ExpectTga(d, psNotThis, 'TGA, 12 bits a pixel');
   d := ReadAll(dirO + '/tga_gray8.tga');
   ExpectTga(Copy(d, 0, Length(d) - 1), psTruncated, 'TGA one byte short');
+  Writeln('TGA run-length');
+  d := ReadAll(dirO + '/tga_rle24.tga'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_TGA_RLE) and (L.dataOffset = 18) and (L.dataOffset + L.dataLength = Length(d)),
+    'tga_rle24.tga: run-length, the packets to the end');
+  d := ReadAll(dirO + '/tga_rle_mapped.tga'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_TGA_RLE) and (L.dataOffset = 18 + 36), 'tga_rle_mapped.tga: after its colour map');
+  ExpectTga(Copy(d, 0, Length(d) - 1), psTruncated, 'TGA run-length one byte short');
+  d := ReadAll(dirO + '/tga_rle24.tga');
+  d[18] := $FF; d[19] := 1; d[20] := 2; d[21] := 3; d := Copy(d, 0, 22);
+  d := WithU16(WithU16(d, 12, 2), 14, 2);
+  ExpectTga(d, psMalformed, 'a run of 128 in an image of 4 pixels');
+  d := WithU16(WithU16(ReadAll(dirO + '/tga_rle24.tga'), 12, 65535), 14, 65535);
+  ExpectTga(d, psTruncated, '65535 x 65535 in a few bytes: nothing allocated');
+
   d := ReadAll(dirO + '/ras_bgr24.ras');
   ExpectSun(Copy(d, 0, 20), psMalformed, 'Sun, cut inside the header');
   ExpectSun(Copy(d, 0, Length(d) - 1), psTruncated, 'Sun one byte short');
@@ -206,6 +219,12 @@ begin
   Check(ParseWbmp(Copy(d, 0, Length(d) - 1), L) = psNotThis, 'WBMP one byte short: not a WBMP (its signature is weak)');
   Check(ParseWbmp(Bytes(#0#0#$FF#$FF#$FF#$FF#$7F#1), L) = psNotThis, 'WBMP, a width of 5 bytes');
 
+  Writeln('the layout''s own limits');
+  L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
+  Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
+  L.bits := 33;
+  Check(SizeRows(L, 1000) = psMalformed, '33 bits a sample: malformed');
+
   Writeln('fuzzing');
   samples := nil;
   for k := 0 to 7 do begin
@@ -217,7 +236,7 @@ begin
       3: samples[High(samples)] := ReadAll(dirH + '/stb.hdr');
       4: samples[High(samples)] := ReadAll(dirO + '/tga_mapped8.tga');
       5: samples[High(samples)] := ReadAll(dirO + '/ras_mapped8.ras');
-      6: samples[High(samples)] := ReadAll(dirO + '/ff_rgba16.ff');
+      6: samples[High(samples)] := ReadAll(dirO + '/tga_rle_mapped.tga');
     else samples[High(samples)] := ReadAll(dirO + '/wbmp_shape.wbmp');
     end;
   end;
@@ -240,5 +259,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 6 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 65) then Halt(1);
+  if (failures > 0) or (cells < 70) then Halt(1);
 end.

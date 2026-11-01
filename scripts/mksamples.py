@@ -201,3 +201,39 @@ w, h = 45, 30
 write('wbmp_shape.wbmp', b'\x00\x00' + mbi(w) + mbi(h) + b''.join(pack1([1 if ((x - 22) ** 2 + (y - 15) ** 2) < 120 else 0 for x in range(w)]) for y in range(h)))
 w, h = 200, 3
 write('wbmp_wide.wbmp', b'\x00\x00' + mbi(w) + mbi(h) + b''.join(pack1([(x // 5 + y) % 2 for x in range(w)]) for y in range(h)))
+
+# TGA run-length: a usual coder (runs of 2 or more, rows apart), one whose
+# packets cross rows, and one that chooses at random: PRA has to give back
+# any of them, byte for byte
+def tga_rle(px, w, h, ps, cross, randomly):
+    out = bytearray(); rows = [px] if cross else [px[y*w:(y+1)*w] for y in range(h)]
+    for row in rows:
+        i = 0; n = len(row)
+        while i < n:
+            r = 1
+            while i + r < n and r < 128 and row[i + r] == row[i]: r += 1
+            if randomly: r = 1 + rand() % r
+            if r >= 2 or (randomly and rand() % 4 == 0):
+                out.append(0x80 | (r - 1)); out += row[i]; i += r; continue
+            j = i + 1
+            while j < n and j - i < 128 and not (j + 1 < n and row[j + 1] == row[j]):
+                j += 1
+            if randomly: j = i + 1 + rand() % (j - i)
+            out.append(j - i - 1)
+            for k in range(i, j): out += row[k]
+            i = j
+    return bytes(out)
+
+def tga_rle_file(name, imgtype, bpp, pixel, cross, randomly, cmap=b'', cmbits=0, w=37, h=23):
+    ps = (bpp + 7) // 8
+    px = [pixel(x, y) for y in range(h) for x in range(w)]
+    cmlen = len(cmap) // ((cmbits + 7) // 8) if cmap else 0
+    head = struct.pack('<BBBHHBHHHHBB', 0, 1 if cmap else 0, imgtype, 0, cmlen, cmbits, 0, 0, w, h, bpp, 0)
+    write(name, head + cmap + tga_rle(px, w, h, ps, cross, randomly))
+
+flat = lambda x, y, c: 50 if 8 <= x < 25 else smooth(x, y, c, 255)
+tga_rle_file('tga_rle24.tga', 10, 24, lambda x, y: bytes([flat(x, y, 2), flat(x, y, 1), flat(x, y, 0)]), False, False)
+tga_rle_file('tga_rle32_cross.tga', 10, 32, lambda x, y: bytes([flat(x, y, 2), flat(x, y, 1), flat(x, y, 0), 255]), True, False)
+tga_rle_file('tga_rle8_random.tga', 11, 8, lambda x, y: bytes([flat(x, y, 0) // 8 * 8]), False, True)
+tga_rle_file('tga_rle_mapped.tga', 9, 8, lambda x, y: bytes([(x // 6 + y // 4) % 12]), True, True,
+             cmap=bytes(i * 9 % 256 for i in range(36)), cmbits=24)
