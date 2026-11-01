@@ -903,3 +903,36 @@ def xcf(name, w, h, layers):
     write(name, bytes(blob))
 xcf('xcf_layers.xcf', 70, 40, [(70, 40, 4, lambda x, y, c: 255 if c == 3 else smooth(x, y, c, 255), lambda x, y, c: 255 if (x - 35) ** 2 + (y - 20) ** 2 < 300 else 0),
                                (30, 20, 3, lambda x, y, c: ((x // 6) * 40 + c * 70) % 256, None)])
+
+# PICT: version 2 with an 8-bit PackBitsRect (a colour table) and a 32-bit
+# DirectBitsRect (packType 4: a row's planes), version 1 with a 1-bit one
+def pict_rows(rows, rb):
+    out = b''
+    for r in rows:
+        e = packbits(r, len(r))
+        out += (struct.pack('>H', len(e)) if rb > 250 else bytes([len(e)])) + e
+    return out
+def pict2(name, ops, w, h):
+    body = struct.pack('>H', 0) + struct.pack('>4h', 0, 0, h, w) + b'\x00\x11\x02\xff' + b'\x0c\x00' + bytes(24) + ops
+    if len(body) & 1: body += b'\0'
+    write(name, bytes(512) + body + b'\x00\xff')
+def pixmap(rb, w, h, pt, ps, cmpc, cmps):
+    return struct.pack('>H4h', rb | 0x8000, 0, 0, h, w) + struct.pack('>HHIIIHHHHIII', 0, pt, 0, 0x480000, 0x480000, 16 if ps > 8 else 0, ps, cmpc, cmps, 0, 0, 0)
+w, h = 45, 21
+rb = 46
+rows = [bytes(((x // 4) + (y // 3)) % 20 if x < w else 0 for x in range(rb)) for y in range(h)]
+ctab = struct.pack('>IHH', 0, 0, 19) + b''.join(struct.pack('>4H', i, i * 3000 % 65536, i * 7000 % 65536, i * 11000 % 65536) for i in range(20))
+op98 = struct.pack('>H', 0x98) + pixmap(rb, w, h, 0, 8, 1, 8) + ctab + struct.pack('>4h', 0, 0, h, w) * 2 + struct.pack('>H', 0) + pict_rows(rows, rb)
+pict2('pict_indexed.pict', op98, w, h)
+w, h = 33, 17
+rb = 4 * w
+rows = [b''.join(bytes(smooth(x, y, c, 255) for x in range(w)) for c in range(3)) for y in range(h)]
+op9a = struct.pack('>HI', 0x9A, 0xFF) + pixmap(rb, w, h, 4, 32, 3, 8) + struct.pack('>4h', 0, 0, h, w) * 2 + struct.pack('>H', 0) + pict_rows(rows, rb)
+pict2('pict_direct32.pict', op9a, w, h)
+# version 1: one-byte opcodes, a 1-bit PackBitsRect
+w, h = 70, 25
+rb = 10
+rows = [pack1([1 if (x * 3 + y * 5) % 11 < 4 else 0 for x in range(w)]).ljust(rb, b'\0') for y in range(h)]
+v1 = struct.pack('>H', 0) + struct.pack('>4h', 0, 0, h, w) + b'\x11\x01' + b'\x98' + struct.pack('>H4h', rb, 0, 0, h, w) \
+     + struct.pack('>4h', 0, 0, h, w) * 2 + struct.pack('>H', 0) + pict_rows(rows, rb) + b'\xff'
+write('pict_v1_bitmap.pict', bytes(512) + v1)

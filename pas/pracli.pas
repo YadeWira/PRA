@@ -379,6 +379,7 @@ begin
     rfIFF: Result := '.iff';
     rfMIFF: Result := '.miff';
     rfXCF: Result := '.xcf';
+    rfPICT: Result := '.pict';
   end;
 end;
 

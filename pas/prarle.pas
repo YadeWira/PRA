@@ -171,6 +171,21 @@ function XcfRebuild(const raw, side: TBytes; w, h: Int64; bpp: Integer; usedLimi
 { at worst 3 bytes for a run of up to 65535 }
 function XcfFits(w, h: Int64; bpp: Integer; available: Int64): Boolean;
 
+{ ---------- PICT rows ---------- }
+
+{ PICT's packed rows: each a count of its bytes (1 byte, or 2 when the
+  row's bytes are over 250) and the row PackBits coded by units of 1 or 2
+  bytes (16-bit pixels). rows of rowLen bytes at d[first..]: the rows, the
+  packets' choices coded (side), the coded length. countWide: 2-byte
+  counts. }
+function PictRowsScan(const d: TBytes; first: SizeInt; rows, rowLen: Int64; nunit: Integer; countWide: Boolean;
+                      out raw, side: TBytes; out used: Int64): TParseStatus;
+function PictRowsLength(const d: TBytes; first: SizeInt; rows, rowLen: Int64; nunit: Integer; countWide: Boolean;
+                        out used: Int64): TParseStatus;
+function PictRowsRebuild(const raw, side: TBytes; rows, rowLen: Int64; nunit: Integer; countWide: Boolean;
+                         usedLimit: Int64; out coded: TBytes): Boolean;
+function PictRowsFits(rows, rowLen: Int64; nunit: Integer; available: Int64): Boolean;
+
 implementation
 
 uses Math;
@@ -1511,6 +1526,192 @@ begin
         end;
       end;
     end;
+  Result := o = usedLimit;
+end;
+
+
+{ ---------- PICT rows ---------- }
+
+function PictRowsFits(rows, rowLen: Int64; nunit: Integer; available: Int64): Boolean;
+begin
+  Result := (rows >= 1) and (rowLen >= 1) and (nunit in [1, 2]) and (rowLen mod nunit = 0) and (rowLen <= MAX_RAW)
+    and (rows <= MAX_RAW div rowLen) and (available >= 0)
+    and (rows * (2 + (rowLen div nunit + 127) div 128 * (1 + nunit)) <= available + rows);
+end;
+
+{ one row's packets: walk them; False when they are not exactly rowLen }
+function PictRowWalk(const d: TBytes; p, e: SizeInt; rowLen: Int64; nunit: Integer): Boolean;
+var n: Int64; c: Integer;
+begin
+  n := 0;
+  while p < e do begin
+    c := d[p];
+    if c < 128 then begin Inc(n, (c + 1) * nunit); Inc(p, 1 + (c + 1) * nunit); end
+    else if c > 128 then begin Inc(n, (257 - c) * nunit); Inc(p, 1 + nunit); end
+    else Exit(False);
+  end;
+  Result := (p = e) and (n = rowLen);
+end;
+
+function PictRowsLength(const d: TBytes; first: SizeInt; rows, rowLen: Int64; nunit: Integer; countWide: Boolean;
+                        out used: Int64): TParseStatus;
+var p: SizeInt; y, cnt: Int64;
+begin
+  used := 0;
+  if not PictRowsFits(rows, rowLen, nunit, High(Int64) shr 2) then Exit(psMalformed);
+  p := first; y := 0;
+  while y < rows do begin
+    if countWide then begin
+      if p + 2 > Length(d) then Exit(psTruncated);
+      cnt := (d[p] shl 8) or d[p + 1]; Inc(p, 2);
+    end else begin
+      if p + 1 > Length(d) then Exit(psTruncated);
+      cnt := d[p]; Inc(p);
+    end;
+    if p + cnt > Length(d) then Exit(psTruncated);
+    if not PictRowWalk(d, p, p + cnt, rowLen, nunit) then Exit(psUnsupported);
+    Inc(p, cnt); Inc(y);
+  end;
+  used := p - first;
+  Result := psOk;
+end;
+
+{ units equal to unit n from n on, at most cap }
+function UnitRunAt(const raw: TBytes; base, n, total: Int64; nunit, cap: Integer): Integer;
+begin
+  Result := 1;
+  while (Result < cap) and (n + Result < total) do begin
+    if nunit = 1 then begin
+      if raw[base + n + Result] <> raw[base + n] then Exit;
+    end else if (raw[base + 2 * (n + Result)] <> raw[base + 2 * n]) or (raw[base + 2 * (n + Result) + 1] <> raw[base + 2 * n + 1]) then Exit;
+    Inc(Result);
+  end;
+end;
+
+{ a packet of a row's units, both ways: against the run and the literal a
+  usual writer makes there }
+procedure CodePictPacket(var pc: TPacketCoder; const raw: TBytes; base, n, total: Int64; nunit: Integer;
+                         var prevRun, isRun, count: Integer);
+var er, lit, lit2, cap, k, ctx: Integer;
+begin
+  er := UnitRunAt(raw, base, n, total, nunit, 128);
+  ctx := BmpBucket(er) + 8 * prevRun + 16 * Ord(n + er = total);
+  isRun := pc.Bit(ctx, isRun);
+  if isRun <> 0 then begin
+    if pc.Bit(64 + BmpBucket(er), Ord(count = er)) <> 0 then count := er
+    else count := pc.Tree(1024, count - 1, 7) + 1;
+  end else begin
+    cap := 128; if cap > total - n then cap := total - n;
+    lit := 1; lit2 := 0;
+    while lit < cap do begin
+      k := UnitRunAt(raw, base, n + lit, total, nunit, 3);
+      if (lit2 = 0) and (k >= 2) then lit2 := lit;
+      if k >= 3 then Break;
+      Inc(lit);
+    end;
+    if lit2 = 0 then lit2 := lit;
+    ctx := 96 + BmpBucket(lit) + 8 * Ord(lit = cap);
+    if pc.Bit(ctx, Ord(count = lit)) <> 0 then count := lit
+    else if (lit2 <> lit) and (pc.Bit(ctx + 16, Ord(count = lit2)) <> 0) then count := lit2
+    else count := pc.Tree(1536, count - 1, 7) + 1;
+  end;
+  prevRun := isRun;
+end;
+
+function PictRowsScan(const d: TBytes; first: SizeInt; rows, rowLen: Int64; nunit: Integer; countWide: Boolean;
+                      out raw, side: TBytes; out used: Int64): TParseStatus;
+var p, e: SizeInt; y, n, total, base: Int64; c, k, isRun, cnt, prevRun, cw: Integer; pc: TPacketCoder;
+begin
+  raw := nil; side := nil;
+  Result := PictRowsLength(d, first, rows, rowLen, nunit, countWide, used);
+  if Result <> psOk then Exit;
+  SetLength(raw, rows * rowLen);
+  total := rowLen div nunit;
+  if countWide then cw := 2 else cw := 1;
+  pc.Init(True, nil);
+  p := first; y := 0;
+  while y < rows do begin
+    if countWide then e := p + 2 + ((d[p] shl 8) or d[p + 1]) else e := p + 1 + d[p];
+    Inc(p, cw);
+    base := y * rowLen; n := 0;
+    { the row's bytes first: the choices look ahead in them }
+    while p < e do begin
+      c := d[p];
+      if c < 128 then begin
+        cnt := c + 1;
+        for k := 0 to cnt * nunit - 1 do raw[base + n * nunit + k] := d[p + 1 + k];
+        Inc(p, 1 + cnt * nunit);
+      end else begin
+        cnt := 257 - c;
+        for k := 0 to cnt * nunit - 1 do raw[base + n * nunit + k] := d[p + 1 + k mod nunit];
+        Inc(p, 1 + nunit);
+      end;
+      Inc(n, cnt);
+    end;
+    Inc(y);
+  end;
+  p := first; y := 0;
+  while y < rows do begin
+    if countWide then e := p + 2 + ((d[p] shl 8) or d[p + 1]) else e := p + 1 + d[p];
+    Inc(p, cw);
+    base := y * rowLen; n := 0; prevRun := 0;
+    while p < e do begin
+      c := d[p];
+      if c < 128 then begin cnt := c + 1; isRun := 0; Inc(p, 1 + cnt * nunit); end
+      else begin cnt := 257 - c; isRun := 1; Inc(p, 1 + nunit); end;
+      CodePictPacket(pc, raw, base, n, total, nunit, prevRun, isRun, cnt);
+      Inc(n, cnt);
+    end;
+    Inc(y);
+  end;
+  side := pc.enc.Finish;
+end;
+
+function PictRowsRebuild(const raw, side: TBytes; rows, rowLen: Int64; nunit: Integer; countWide: Boolean;
+                         usedLimit: Int64; out coded: TBytes): Boolean;
+var
+  pc: TPacketCoder; y, n, total, base: Int64; o, start: SizeInt; isRun, cnt, prevRun, k, cw: Integer; len: Int64;
+begin
+  coded := nil; Result := False;
+  if not PictRowsFits(rows, rowLen, nunit, High(Int64) shr 2) or (Length(raw) <> rows * rowLen) or (usedLimit < 0) then Exit;
+  SetLength(coded, usedLimit);
+  total := rowLen div nunit;
+  if countWide then cw := 2 else cw := 1;
+  pc.Init(False, side);
+  o := 0; y := 0;
+  while y < rows do begin
+    if o + cw > usedLimit then Exit;
+    start := o; Inc(o, cw);
+    base := y * rowLen; n := 0; prevRun := 0;
+    while n < total do begin
+      isRun := 0; cnt := 1;
+      CodePictPacket(pc, raw, base, n, total, nunit, prevRun, isRun, cnt);
+      if (cnt < 1) or (cnt > 128) or (n + cnt > total) then Exit;
+      if isRun <> 0 then begin
+        if (cnt < 2) or (o + 1 + nunit > usedLimit) then Exit;
+        if UnitRunAt(raw, base, n, total, nunit, cnt) < cnt then Exit;     { only a damaged side }
+        coded[o] := 257 - cnt;
+        for k := 0 to nunit - 1 do coded[o + 1 + k] := raw[base + n * nunit + k];
+        Inc(o, 1 + nunit);
+      end else begin
+        if o + 1 + cnt * nunit > usedLimit then Exit;
+        coded[o] := cnt - 1;
+        for k := 0 to cnt * nunit - 1 do coded[o + 1 + k] := raw[base + n * nunit + k];
+        Inc(o, 1 + cnt * nunit);
+      end;
+      Inc(n, cnt);
+    end;
+    { the row's count, now that its length is known }
+    len := o - start - cw;
+    if countWide then begin
+      if len > 65535 then Exit;
+      coded[start] := len shr 8; coded[start + 1] := len and 255;
+    end else begin
+      if len > 255 then Exit;
+      coded[start] := len;
+    end;
+    Inc(y);
+  end;
   Result := o = usedLimit;
 end;
 

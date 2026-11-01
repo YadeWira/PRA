@@ -36,7 +36,7 @@ type
     rfICO, rfCUR, rfDCX,
     rfDPX, rfCineon, rfFITS, rfVICAR, rfDICOM, rfEXR,
     { a TIFF file is parts (praparts); its strips are images of this format }
-    rfTIFF, rfPSD, rfIFF, rfMIFF, rfXCF);
+    rfTIFF, rfPSD, rfIFF, rfMIFF, rfXCF, rfPICT);
 
   TParseStatus = (
     psOk,
@@ -62,7 +62,8 @@ const
   CODING_PLANES_PACKBITS = 12;
   CODING_ILBM = 13;
   CODING_MIFF_RLE = 14; { MIFF: a pixel and a count (prarle) }
-  CODING_XCF = 15;      { XCF: a level's tiles, each plane run-length (prarle) }     { IFF ILBM, PBM, ACBM: bitplanes, ByteRun1 (praother) }  { PackBits of planes, interleaved for the codec: PSD's composite }      { OpenEXR scanlines: offsets, blocks, channels per line (prasci) }
+  CODING_XCF = 15;
+  CODING_PICT_ROWS = 16;  { PICT: a count and PackBits a row, by bytes or 16-bit units; 32 bits: planes a row (prarle) }      { XCF: a level's tiles, each plane run-length (prarle) }     { IFF ILBM, PBM, ACBM: bitplanes, ByteRun1 (praother) }  { PackBits of planes, interleaved for the codec: PSD's composite }      { OpenEXR scanlines: offsets, blocks, channels per line (prasci) }
   CODING_PLANES = 6;    { verbatim, the channels' planes one after the other
                           (SGI, VIFF): interleaved for the codec (prarle) }
 
@@ -139,6 +140,7 @@ begin
     rfIFF: Result := 'IFF';
     rfMIFF: Result := 'MIFF';
     rfXCF: Result := 'XCF';
+    rfPICT: Result := 'PICT';
   else Result := 'none';
   end;
 end;

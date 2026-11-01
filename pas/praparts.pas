@@ -23,6 +23,10 @@
   - XCF (GIMP, versions 0 to 3, run-length): each layer's, mask's and
     channel's first level (its tiles, one after another) an image; the
     rest (the structures, the tile pointers, the lower levels) bytes.
+  - PICT (versions 1 and 2, MacBinary too): its opcodes walked; each
+    pixel opcode's pixels (bitmaps, indices, 16 and 32 bits; as they are
+    or in PackBits rows) and QuickTime's uncompressed 32-bit images an
+    image; the rest (drawing, JPEG) bytes.
   - PSD and PSB: each layer's channels and the composite image, raw or
     PackBits (its table of row lengths kept as bytes), each an image (the
     composite's channels interleaved); the rest, bytes.
@@ -519,6 +523,12 @@ begin
   Result := (Int64(d[i]) shl 24) or (Int64(d[i + 1]) shl 16) or (Int64(d[i + 2]) shl 8) or d[i + 3];
 end;
 
+function S16BE(const d: TBytes; i: Int64): Int64;
+begin
+  Result := U16BE(d, i);
+  if Result >= $8000 then Result := Result - $10000;
+end;
+
 function S32BE(const d: TBytes; i: Int64): Int64;
 begin
   Result := U32BE(d, i);
@@ -847,6 +857,180 @@ begin
   Result := True;
 end;
 
+{ ---------- PICT ---------- }
+
+{ the data's length after an opcode (its operands), from p; -1 if not one
+  this walker knows (the file then is not split) }
+function PictOpLen(const d: TBytes; p: Int64; op: Integer; v2: Boolean): Int64;
+begin
+  Result := -1;
+  if p > Length(d) then Exit;
+  case op of
+    $00, $17..$19, $1C, $1E, $38..$3F, $48..$4F, $58..$5F, $78..$7F, $88..$8F, $B0..$CF: Result := 0;
+    $04: Result := 1;
+    $03, $05, $08, $0D, $15, $16, $23, $A0: Result := 2;
+    $06, $07, $0B, $0C, $0E, $0F, $21, $68..$6F: Result := 4;
+    $1A, $1B, $1D, $1F, $22: Result := 6;
+    $02, $09, $0A, $10, $20, $30..$37, $40..$47, $50..$57: Result := 8;
+    $60..$67: Result := 12;
+    $11: if v2 then Result := 2 else Result := 1;
+    $24..$27, $2C..$2F, $92..$97, $9C..$9F, $A2..$AF: Result := 2 + U16BE(d, p);
+    $28: if p + 5 <= Length(d) then Result := 5 + d[p + 4];
+    $29, $2A: if p + 2 <= Length(d) then Result := 2 + d[p + 1];
+    $2B: if p + 3 <= Length(d) then Result := 3 + d[p + 2];
+    $01, $70..$77, $80..$87: Result := U16BE(d, p);
+    $A1: Result := 4 + U16BE(d, p + 2);
+    $D0..$FE, $8100..$FFFF: Result := 4 + U32BE(d, p);
+    $100..$7FFF: Result := (op shr 8) * 2;
+    $8000..$80FF: Result := 0;
+  end;
+end;
+
+{ a pixel opcode at p (its operands): the image region, if PRA takes it;
+  next: where the opcode's data ends; False if it cannot be walked }
+function PictPixels(const d: TBytes; p: Int64; op: Integer; var regs: TTiffRegions; out next: Int64): Boolean;
+var
+  q, rb, top, left, bottom, right, w, h, packType, pixSize, cmpCount, size, used, rowLen, wr: Int64;
+  isPm, direct, isPacked, wide: Boolean; nunit: Integer; R: TTiffRegion; L: TRasterLayout;
+begin
+  Result := False; next := -1;
+  direct := (op = $9A) or (op = $9B);
+  q := p;
+  if direct then Inc(q, 4);
+  rb := U16BE(d, q); if rb < 0 then Exit;
+  isPm := (rb and $8000) <> 0; rb := rb and $3FFF;
+  top := S16BE(d, q + 2); left := S16BE(d, q + 4); bottom := S16BE(d, q + 6); right := S16BE(d, q + 8);
+  w := right - left; h := bottom - top;
+  Inc(q, 10);
+  packType := 0; pixSize := 1; cmpCount := 1;
+  if isPm then begin
+    packType := U16BE(d, q + 2); pixSize := U16BE(d, q + 18); cmpCount := U16BE(d, q + 20);
+    Inc(q, 36);
+    if not direct then begin
+      size := U16BE(d, q + 6);
+      if size < 0 then Exit;
+      Inc(q, 8 + (size + 1) * 8);
+    end;
+  end else if direct then Exit;
+  Inc(q, 18);                                          { the two rectangles and the mode }
+  if (op = $91) or (op = $99) or (op = $9B) then begin
+    size := U16BE(d, q); if size < 2 then Exit;
+    Inc(q, size);
+  end;
+  if (q > Length(d)) or (w < 1) or (h < 1) or (rb < 1) then Exit;
+  { the pixels: their layout, packed or not }
+  L.Clear;
+  L.format := rfPICT; L.bigEndian := True; L.height := h; L.channels := 1;
+  isPacked := (op >= $98) and (rb >= 8) and not (direct and (packType in [1, 2]));
+  nunit := 1;
+  if not direct then begin
+    if not (pixSize in [1, 2, 4, 8]) then Exit;
+    L.bits := pixSize; L.width := rb * 8 div pixSize; rowLen := rb;
+  end else if pixSize = 16 then begin
+    L.bits := 16; L.width := rb div 2; rowLen := rb; nunit := 2;
+  end else if pixSize = 32 then begin
+    L.bits := 8;
+    if packType = 2 then begin L.channels := 3; L.width := w; rowLen := 3 * w; end
+    else if not isPacked then begin L.channels := 4; L.width := rb div 4; rowLen := rb; end
+    else begin
+      if not (cmpCount in [3, 4]) then Exit;
+      L.channels := cmpCount; L.width := w; rowLen := cmpCount * w;
+      { the counts are wide when the pixmap's rows are: the decoder knows 4 x w }
+      if (rb > 250) <> (4 * w > 250) then Exit;
+    end;
+  end else Exit;
+  L.maxval := (Int64(1) shl L.bits) - 1;
+  if (L.width < 1) or (L.width > MAX_DIMENSION) or (h > MAX_DIMENSION) then Exit;
+  wide := rb > 250;
+  if isPacked then begin
+    if PictRowsLength(d, q, h, rowLen, nunit, wide, used) <> psOk then Exit;
+    L.coding := CODING_PICT_ROWS;
+  end else begin
+    used := rowLen * h;
+    if used > Length(d) - q then Exit;
+  end;
+  L.dataOffset := 0; L.dataLength := used;
+  if SizeRows(L, High(Int64) shr 2) <> psOk then Exit;
+  L.dataLength := used;
+  wr := 0;
+  R.first := q; R.len := used; R.L := L; R.joinable := False; R.key := Length(regs);
+  SetLength(regs, Length(regs) + 1); regs[High(regs)] := R;
+  next := q + used;
+  Result := True;
+end;
+
+{ QuickTime's uncompressed 32-bit image inside opcode $8200 }
+procedure PictQuickTime(const d: TBytes; p, len: Int64; var regs: TTiffRegions);
+var id, idSize, w, h, dataSize, depth, matte, mask: Int64; R: TTiffRegion;
+begin
+  if len < 4 + 68 then Exit;
+  matte := U32BE(d, p + 4 + 38); mask := U32BE(d, p + 4 + 64);
+  if (matte < 0) or (mask < 0) then Exit;
+  id := p + 4 + 68 + matte + mask;
+  if id + 86 > p + 4 + len then Exit;
+  idSize := U32BE(d, id);
+  if (d[id + 4] <> Ord('r')) or (d[id + 5] <> Ord('a')) or (d[id + 6] <> Ord('w')) or (d[id + 7] <> Ord(' ')) then Exit;
+  w := U16BE(d, id + 32); h := U16BE(d, id + 34); dataSize := U32BE(d, id + 44); depth := U16BE(d, id + 82);
+  if (depth <> 32) or (w < 1) or (h < 1) or (dataSize <> w * h * 4) or (id + idSize + dataSize > p + 4 + len) then Exit;
+  R.L.Clear;
+  R.L.format := rfPICT; R.L.width := w; R.L.height := h; R.L.channels := 4; R.L.bits := 8; R.L.maxval := 255;
+  R.L.bigEndian := True; R.L.dataOffset := 0; R.L.dataLength := dataSize;
+  if SizeRows(R.L, dataSize) <> psOk then Exit;
+  R.first := id + idSize; R.len := dataSize; R.joinable := False; R.key := Length(regs);
+  SetLength(regs, Length(regs) + 1); regs[High(regs)] := R;
+end;
+
+function SplitPict(const d: TBytes; var parts: TParts): Boolean;
+var
+  base, p, n, next: Int64; op, k, steps: Integer; v2: Boolean; regs: TTiffRegions;
+begin
+  Result := False;
+  { the picture: after a 512-byte header (perhaps after MacBinary's 128),
+    or at the start; version 2 (00 11 02 FF) or 1 (11 01) }
+  base := -1;
+  for k := 0 to 2 do begin
+    case k of 0: p := 512; 1: p := 128 + 512; else p := 0; end;
+    if p + 14 > Length(d) then Continue;
+    if (d[p + 10] = 0) and (d[p + 11] = $11) and (d[p + 12] = 2) and (d[p + 13] = $FF) then begin base := p; v2 := True; Break; end;
+    if (d[p + 10] = $11) and (d[p + 11] = 1) then begin base := p; v2 := False; Break; end;
+  end;
+  if base < 0 then Exit;
+  p := base + 10; regs := nil; steps := 0;
+  while True do begin
+    Inc(steps);
+    if steps > 1000000 then Exit;
+    if v2 then begin
+      if p + 2 > Length(d) then Exit;
+      op := U16BE(d, p); Inc(p, 2);
+    end else begin
+      if p + 1 > Length(d) then Exit;
+      op := d[p]; Inc(p);
+    end;
+    if op = $FF then Break;
+    if (op = $90) or (op = $91) or (op = $98) or (op = $99) or (op = $9A) or (op = $9B) then begin
+      if not PictPixels(d, p, op, regs, next) then Exit;
+      p := next;
+    end else begin
+      n := PictOpLen(d, p, op, v2);
+      if (n < 0) or (n > Length(d) - p) then Exit;
+      if op = $8200 then PictQuickTime(d, p, n - 4, regs);
+      Inc(p, n);
+    end;
+    { version 2: each opcode on an even offset }
+    if v2 and Odd(p - base) then Inc(p);
+  end;
+  if regs = nil then Exit;
+  p := 0;
+  for k := 0 to High(regs) do begin
+    if regs[k].first < p then Exit;
+    AddBytes(parts, p, regs[k].first - p);
+    AddImage(parts, regs[k].first, regs[k].len, regs[k].L);
+    p := regs[k].first + regs[k].len;
+  end;
+  AddBytes(parts, p, Length(d) - p);
+  Result := True;
+end;
+
 function SplitFile(const d: TBytes; st: TParseStatus; const L: TRasterLayout;
                    out parts: TParts; out fmt: TRasterFormat): Boolean;
 begin
@@ -869,6 +1053,8 @@ begin
   if SplitPsd(d, parts) then begin fmt := rfPSD; Exit(True); end;
   parts := nil;
   if SplitXcf(d, parts) then begin fmt := rfXCF; Exit(True); end;
+  parts := nil;
+  if SplitPict(d, parts) then begin fmt := rfPICT; Exit(True); end;
   parts := nil;
   if SplitIco(d, parts, fmt) then Exit(True);
   parts := nil; fmt := rfNone;

@@ -53,7 +53,7 @@ work in place).
 | IFF ILBM | ByteRun1, bitplanes | iffILBM 128 | **done**: ILBM (1-8, 24, 32 planes), PBM, ACBM; not RGBN/RGB8, VDAT, mask planes |
 | MIFF | raw / RLE | miff 18 | **done**: PseudoClass and DirectClass (gray, RGB, CMYK, alpha), 8 and 16 bits, ImageMagick's RLE, old and new headers, montages; not Zip/BZip |
 | XCF | GIMP RLE tiles | xcf 10 | **done**: versions 0-3 (8 bits), RLE; each layer's, mask's and channel's first level an image |
-| PICT | PackBits opcodes | pict 67 | next |
+| PICT | PackBits opcodes | pict 67 | **done**: versions 1 and 2, MacBinary too; BitsRect, PackBitsRect, DirectBitsRect (1-8, 16, 32 bits; packTypes 1-4) and QuickTime's raw 32-bit; JPEG and Cinepak QuickTime stay bytes |
 | Palm, Intergraph, VTF | raw / RLE / DXT | palmBitmap 11, intergraphRasterImage 12, vtf 10 | left: Palm's files are tiny (44 KB in all), Intergraph's are CCITT G4 or 1-bit runs, every VTF is DXT |
 
 ## Out of scope

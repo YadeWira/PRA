@@ -381,6 +381,19 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
 
+### 01/11/2026: PICT
+
+PICT is a stream of drawing opcodes; `praparts` walks it (versions 1 and
+2, a 512-byte header, MacBinary's 128 before it) and cuts out each pixel
+opcode's pixels: bitmaps and indices (rows as they are, or a count and
+PackBits a row), 16-bit pixels (PackBits by 16-bit units), 32-bit ones
+(a row's planes, PackBits; or 24 bits as they are), and QuickTime's
+uncompressed 32-bit images. A row's count is never coded: the rebuilt
+row gives it. 46 corpus files of 66 (the others are JPEG or Cinepak
+QuickTime, drawings, MacBinary of other things), 23.8 MB -> 7.07 MB
+(29.65%), every one back byte for byte; xz on the same files: more than
+10.5 MB (sample_1920x1280.pict 2.73 MB against 5.38).
+
 ### 01/11/2026: XCF
 
 GIMP's files (versions 0 to 3, run-length): each layer's, mask's and

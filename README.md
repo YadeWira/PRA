@@ -25,7 +25,7 @@ images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; and film and
 science: DPX, Cineon (10 bits packed too), FITS, VICAR, uncompressed DICOM
 and uncompressed OpenEXR; and containers: TIFF and BigTIFF (uncompressed
 and PackBits), PSD and PSB (layers too), IFF ILBM, PBM and ACBM, MIFF,
-GIMP's XCF; see
+GIMP's XCF, Macintosh PICT; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 PRA belongs to a family of recompressors that share that rule: the original

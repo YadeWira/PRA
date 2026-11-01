@@ -583,15 +583,27 @@ begin
     'xcf_layers.xcf: two layers and a mask, their tiles as images');
   dd := Copy(d, 0, Length(d)); dd[9] := Ord('v'); dd[10] := Ord('0'); dd[11] := Ord('1'); dd[12] := Ord('1');
   Check(not Split(dd, parts, fmt), 'XCF v011 (64-bit pointers): not split');
+  d := ReadAll(dirC + '/pict_indexed.pict');
+  Check(Split(d, parts, fmt) and (fmt = rfPICT) and Covers(d, parts) and (Kinds(parts) = 'bib')
+    and (parts[1].L.coding = CODING_PICT_ROWS) and (parts[1].L.bits = 8) and (parts[1].L.width = 46),
+    'pict_indexed.pict: version 2, PackBitsRect of 8 bits, rows of 46');
+  d := ReadAll(dirC + '/pict_direct32.pict');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[1].L.channels = 3) and (parts[1].L.coding = CODING_PICT_ROWS),
+    'pict_direct32.pict: DirectBitsRect, a row''s three planes');
+  d := ReadAll(dirC + '/pict_v1_bitmap.pict');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[1].L.bits = 1), 'pict_v1_bitmap.pict: version 1, a bitmap');
+  dd := Copy(d, 0, Length(d)); dd[512 + 12] := $AB;
+  Check(not Split(dd, parts, fmt), 'PICT, an opcode the walker does not know: not split');
   { mutated containers: never an exception, the parts always the whole file }
-  samples := nil; SetLength(samples, 7);
+  samples := nil; SetLength(samples, 9);
   samples[5] := ReadAll(dirC + '/miff_pseudo_rle.miff'); samples[6] := ReadAll(dirC + '/xcf_layers.xcf');
+  samples[7] := ReadAll(dirC + '/pict_indexed.pict'); samples[8] := ReadAll(dirC + '/pict_direct32.pict');
   samples[0] := ReadAll(dirC + '/tiff_planar_gap.tif'); samples[1] := ReadAll(dirC + '/psd_layers_rle.psd');
   samples[2] := ReadAll(dirC + '/tiff_big.tif'); samples[3] := ReadAll(dirC + '/ilbm_5planes.iff');
   samples[4] := ReadAll(dirC + '/tiff_tiles.tif');
   bad := 0; oks := 0;
   for i := 1 to 10000 do begin
-    d := Copy(samples[i mod 7], 0, Length(samples[i mod 7]));
+    d := Copy(samples[i mod 9], 0, Length(samples[i mod 9]));
     if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
     for k := 1 to 1 + Integer(Rand mod 3) do
       if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 1024)))] := Byte(Rand);
@@ -603,7 +615,7 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF, MIFF, XCF: no exception, the parts the whole file (%d split)', [oks]));
+  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF, MIFF, XCF, PICT: no exception, the parts the whole file (%d split)', [oks]));
 
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
@@ -652,5 +664,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 200) then Halt(1);
+  if (failures > 0) or (cells < 204) then Halt(1);
 end.

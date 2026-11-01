@@ -945,13 +945,42 @@ function SideCoded(const L: TRasterLayout): Boolean;
 begin
   Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES,
                          CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_EXR, CODING_PACKBITS,
-                         CODING_PLANES_PACKBITS, CODING_ILBM, CODING_MIFF_RLE, CODING_XCF];
+                         CODING_PLANES_PACKBITS, CODING_ILBM, CODING_MIFF_RLE, CODING_XCF, CODING_PICT_ROWS];
+end;
+
+{ PICT's 32-bit rows: each row's channels one after another (a plane a
+  row) <-> the pixels, interleaved }
+function RowPlanes(const src: TBytes; w, h: Int64; ch: Integer; toPixels: Boolean): TBytes;
+var y, x: Int64; c: Integer; row: Int64;
+begin
+  Result := nil; SetLength(Result, Length(src));
+  y := 0;
+  while y < h do begin
+    row := y * w * ch;
+    x := 0;
+    while x < w do begin
+      for c := 0 to ch - 1 do
+        if toPixels then Result[row + x * ch + c] := src[row + c * w + x]
+        else Result[row + c * w + x] := src[row + x * ch + c];
+      Inc(x);
+    end;
+    Inc(y);
+  end;
+end;
+
+{ a PICT image's rows: their length, units, counts' width }
+procedure PictRowParams(const L: TRasterLayout; const R: TRasterLayout; out rowLen: Int64; out nunit: Integer;
+                        out wide: Boolean);
+begin
+  if L.bits = 16 then nunit := 2 else nunit := 1;
+  if L.channels > 1 then begin rowLen := L.width * L.channels; wide := 4 * L.width > 250; end
+  else begin rowLen := R.rowBytes; wide := rowLen > 250; end;
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
 function CodedScan(const d: TBytes; const L: TRasterLayout; out raw, side: TBytes): Boolean;
 var used: Int64; dec: TBytes; bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean;
-  ix: TIffParams;
+  ix: TIffParams; rowLen: Int64; nunit: Integer; wide: Boolean;
 begin
   raw := nil; side := nil; Result := False;
   R := RawLayout(L);
@@ -975,6 +1004,12 @@ begin
     CODING_ILBM: Result := IffParams(d, 0, L.dataOffset, ix) and IffScan(d, L.dataOffset, ix, R, raw, side, used);
     CODING_MIFF_RLE: Result := MiffRleScan(d, L.dataOffset, L.width * L.height, PixelBytes(L), raw, side, used) = psOk;
     CODING_XCF: Result := XcfScan(d, L.dataOffset, L.width, L.height, L.channels, raw, side, used) = psOk;
+    CODING_PICT_ROWS: begin
+      PictRowParams(L, R, rowLen, nunit, wide);
+      Result := PictRowsScan(d, L.dataOffset, L.height, rowLen, nunit, wide, dec, side, used) = psOk;
+      if Result then
+        if L.channels > 1 then raw := RowPlanes(dec, L.width, L.height, L.channels, True) else raw := dec;
+    end;
     CODING_PLANES_PACKBITS: begin
       { the planes' rows: a channel's samples in a row }
       Result := PackBitsScan(d, L.dataOffset, R.dataLength, R.rowBytes div L.channels, dec, side, used) = psOk;
@@ -998,6 +1033,7 @@ end;
 function CodedRebuild(const hdr: TBytes; hdrFirst: SizeInt; const raw, side: TBytes; const L: TRasterLayout;
                       out coded: TBytes): Boolean;
 var bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64; ix: TIffParams;
+  rowLen: Int64; nunit: Integer; wide: Boolean;
 begin
   coded := nil; Result := False;
   R := RawLayout(L);
@@ -1018,6 +1054,13 @@ begin
     CODING_ILBM: Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and IffRebuild(raw, side, ix, L.dataLength, coded);
     CODING_MIFF_RLE: Result := MiffRleRebuild(raw, side, PixelBytes(L), L.dataLength, coded);
     CODING_XCF: Result := XcfRebuild(raw, side, L.width, L.height, L.channels, L.dataLength, coded);
+    CODING_PICT_ROWS: begin
+      PictRowParams(L, R, rowLen, nunit, wide);
+      if L.channels > 1 then
+        Result := PictRowsRebuild(RowPlanes(raw, L.width, L.height, L.channels, False), side, L.height, rowLen, nunit, wide,
+                                  L.dataLength, coded)
+      else Result := PictRowsRebuild(raw, side, L.height, rowLen, nunit, wide, L.dataLength, coded);
+    end;
     CODING_PLANES_PACKBITS:
       Result := PackBitsRebuild(SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8), side,
                                 R.rowBytes div L.channels, L.dataLength, coded);
@@ -1037,7 +1080,7 @@ end;
   dataLength coded bytes at all; and do they agree with the header }
 function CodedFits(const hdr: TBytes; hdrFirst: SizeInt; const L: TRasterLayout): Boolean;
 var bpp, planes, bpl, lines, w, ch, bits: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64;
-  ix: TIffParams;
+  ix: TIffParams; rowLen: Int64; nunit: Integer; wide: Boolean;
 begin
   R := RawLayout(L);
   case L.coding of
@@ -1056,6 +1099,10 @@ begin
     CODING_PLANES_PACKBITS: Result := (L.bits in [8, 16]) and PackBitsFits(R.dataLength, L.dataLength);
     CODING_MIFF_RLE: Result := (L.bits in [8, 16]) and MiffRleFits(L.width * L.height, PixelBytes(L), L.dataLength);
     CODING_XCF: Result := (L.bits = 8) and XcfFits(L.width, L.height, L.channels, L.dataLength);
+    CODING_PICT_ROWS: begin
+      PictRowParams(L, R, rowLen, nunit, wide);
+      Result := ((L.channels = 1) or (L.bits = 8)) and PictRowsFits(L.height, rowLen, nunit, L.dataLength);
+    end;
     CODING_ILBM: begin
       { the pixels have to be the ones the header's planes make }
       Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and (L.bits = 8) and (L.height = ix.h)
@@ -1144,6 +1191,7 @@ begin
     rfIFF: h.L.coding := CODING_ILBM;
     rfMIFF: if (flags and 8) <> 0 then h.L.coding := CODING_MIFF_RLE;
     rfXCF: h.L.coding := CODING_XCF;
+    rfPICT: if (flags and 8) <> 0 then h.L.coding := CODING_PICT_ROWS;
     { PSD: PackBits or not, planes or not }
     rfPSD:
       if (flags and 8) <> 0 then begin
@@ -1152,7 +1200,7 @@ begin
   end;
   if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE,
                                                    CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_PACKBITS,
-                                                   CODING_PLANES_PACKBITS, CODING_MIFF_RLE])
+                                                   CODING_PLANES_PACKBITS, CODING_MIFF_RLE, CODING_PICT_ROWS])
      and not ((h.L.coding = CODING_PLANES) and (h.L.format in [rfFITS, rfVICAR, rfDICOM])) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
     { the coded length within the cap, the image within what that length
@@ -1451,7 +1499,7 @@ begin
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
   if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10,
-                  CODING_PACKBITS, CODING_PLANES_PACKBITS, CODING_MIFF_RLE] then flags := flags or 8;
+                  CODING_PACKBITS, CODING_PLANES_PACKBITS, CODING_MIFF_RLE, CODING_PICT_ROWS] then flags := flags or 8;
   if (L.coding = CODING_PLANES) and (L.format in [rfFITS, rfVICAR, rfDICOM]) then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
