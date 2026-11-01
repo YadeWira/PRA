@@ -4,7 +4,7 @@
 RLE-coded raster images (PNM, BMP, Radiance HDR and more), in FreePascal,
 with a C core where it pays and some x86-64 assembly; no libraries.
 
-The spiritual successor of packPNM:
+The spiritual successor of [packPNM](https://github.com/packjpg/packPNM):
 written from scratch, with a codec and container of its own; it shares no
 code with packPNM and does not read its files.
 
@@ -34,7 +34,7 @@ comes back byte for byte, and nothing is written unless it verified.
 | Sibling | Formats | Successor of |
 |---|---|---|
 | [PMPA](https://github.com/YadeWira/PMPA) | MPEG audio (MP1, MP2, MP3) | [packMP3](https://github.com/YadeWira/packMP3), [packMP2](https://github.com/YadeWira/packMP2) |
-| **PRA** | raster images (PNM, BMP, HDR, TGA, PCX, ...) | packPNM |
+| **PRA** | raster images (PNM, BMP, TIFF, PSD, HDR, ...) | [packPNM](https://github.com/packjpg/packPNM) |
 | [PPA](https://github.com/YadeWira/PPA) | the PNG family (PNG, APNG, MNG, JNG) | [packPNG](https://github.com/YadeWira/packPNG) |
 | [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
 | [PJA](https://github.com/YadeWira/PJA) | JPEG and JPEG-LS | [packJPG](https://github.com/YadeWira/packJPG) |
