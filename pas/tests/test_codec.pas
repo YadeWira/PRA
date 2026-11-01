@@ -228,6 +228,16 @@ begin
   Check(DecodeFile(s2, 1 shl 20, back) = dsFutureVersion, 'version ' + IntToStr(STREAM_VERSION + 1) + ': ' + DecodeStatusName(dsFutureVersion));
   s2[0] := 0;
   Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'version 0: damaged');
+  { version 1 kept the header and the tail as they are: made by the code of
+    then (f75c10f) from tests/other/tga_rgb24.tga, which has both }
+  s2 := ReadAll('pas/tests/stream_v1_tga.bin');
+  for k := 0 to High(samples) do
+    if names[k] = 'tga_rgb24.tga' then begin
+      EncodeFile(samples[k], s, why);
+      Check((s2[0] = 1) and (DecodeFile(s2, 1 shl 20, back) = dsOk) and Same(back, samples[k])
+        and (Length(s) < Length(s2)), Format('a version 1 stream: decoded; version 2 codes its header and tail: %d -> %d',
+        [Length(s2), Length(s)]));
+    end;
   s2 := nil;
   Check(DecodeFile(s2, 1 shl 20, back) = dsEmpty, 'empty stream');
 
@@ -273,5 +283,5 @@ begin
 
   Writeln('streams ', Hex(all.Final));
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 32) then Halt(1);
+  if (failures > 0) or (cells < 33) then Halt(1);
 end.

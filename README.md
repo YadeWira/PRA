@@ -39,7 +39,8 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | run-length files, any writer | `pas/prarle.pas` | done (TGA, PCX, Sun Raster, SGI) |
 | more formats | | [the list](doc/FORMATS.md) |
 | model (counters, mixers, APM) | `pas/pramodel.pas` | first version |
-| codec stream (version 1) | `pas/pracodec.pas` | first version |
+| header and tail model | `pas/prabytes.pas` | first version |
+| codec stream (version 2) | `pas/pracodec.pas` | first version |
 | container (`.pra`) | `pas/praformat.pas`, `pas/prapack.pas`, `pas/prafs.pas` | done ([doc/FORMAT.md](doc/FORMAT.md)) |
 | command line (`pra`) | `pas/pracli.pas` | done ([doc/CLI.md](doc/CLI.md)) |
 

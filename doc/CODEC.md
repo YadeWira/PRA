@@ -19,13 +19,14 @@ up and the caller stores the file as it is.
 | 2 | `praarith` | binary arithmetic coder (from PJA) |
 | 3 | `praraster`, `prapnm`, `prabmp`, `prahdr` | parsers: header, pixels, tail |
 | 4 | `pramodel` | counters, hashed tables, mixer, APM |
+| 4 | `prabytes` | the bytes kept (header, tail): a small byte model |
 | 5 | `pracodec` | the stream: layout, header, tail, pixels |
 
-## Stream, version 1
+## Stream, version 2
 
 ```
 version     1 B     1
-header      varint length, then the bytes as they are
+header      a section: the bytes before the pixels
 layout      format 1 B, width, height, channels (varints), bits 1 B,
             flags 1 B (bit 0 big-endian, bit 1 float, bit 2 bottom-up,
             bit 3 run-length coded: TGA, Sun Raster, SGI), maxval (varint)
@@ -33,13 +34,29 @@ layout      format 1 B, width, height, channels (varints), bits 1 B,
             coder as runs: mode 1 B (0 flat, 1 Radiance, 2 stb), count (varint)
   run-length TGA, Sun Raster, PCX, SGI: the coded length (varint), then the
             coder's choices (varint length, then the bytes; prarle)
-tail        varint length, then the bytes as they are
+tail        a section: the bytes after the pixels
   one channel of 2 to 8 bits only: the pixel mode, 1 B (0 samples, 1 indices)
 bands       how many (varint, 1 to 256 and at most the rows), then the length
             of each but the last (varints)
 pixels      each band arithmetic-coded on its own, one after the other, to
             the end of the stream
+
+section     length (varint); when not 0, then 1 B: 0 the bytes as they are,
+            1 coded (prabytes): the coded length (varint), then those bytes
 ```
+
+Version 1 kept both sections as they are (length, then the bytes, no
+method byte); the decoder still reads it.
+
+**The bytes kept.** A section is coded with its own small model
+(`prabytes`), or kept as it is when that is not smaller. Headers are
+structs, names and palettes; the contexts are the last 1, 2, 3 and 5
+bytes, the byte one 4-byte field above with the position in the field,
+the byte one colour (3 bytes) above, and that field with the last byte;
+one mixer selected by the bits so far and the position in the field, then
+an APM. A nibble's counters sit together (16 to a slot), so a byte touches
+two cache lines a context, not eight. The decoder checks a section's
+length against the caps before decoding it.
 
 **Bands.** The rows (of the pixels, or of an HDR file's RGBE) are cut into
 bands of about the same number of rows, each coded with fresh models and its
@@ -264,6 +281,17 @@ not fit its declared size. Some: a 33 MB TGA 11.8%, abydos.ff 2.9%,
 BUGLE.PCX 7.6%, a 17 MB 24-bit PCX 32.6%; sample_1920x1280.sgi
 (run-length) 2,743,857 against 2,731,248 for the same pixels as a PPM: its
 coder's choices and row order cost 0.4%.
+
+### 01/11/2026: the header and the tail coded (stream version 2)
+
+The headers and tails of the corpus's 252 files PRA takes: 205,400 bytes,
+37,486 coded, each on its own (xz -9e on each, or as it is when smaller:
+47,665). Tuned on that set: the mixer's rate is what mattered (6: 40,393;
+48: 37,273); the counters' limit and the table's size little. Per file:
+input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
+1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
+66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
+than the pixels; a header is small.
 
 ### 01/11/2026: XWD, MTV, VIFF, VIPS, uncompressed DDS
 

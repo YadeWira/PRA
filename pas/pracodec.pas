@@ -35,7 +35,9 @@ interface
 uses SysUtils, praraster;
 
 const
-  STREAM_VERSION = 1;
+  { 2: the header and the tail coded (prabytes); 1: kept as they are. The
+    decoder reads both. }
+  STREAM_VERSION = 2;
   PRA_VERSION = '0.1.0';
 
 var
@@ -63,7 +65,7 @@ function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes;
 
 { ---------- byte sink and source ---------- }
 
@@ -129,6 +131,60 @@ begin
     Inc(shift, 7);
   until (x and 128) = 0;
   if Result > maxv then begin ok := False; Result := 0; end;
+end;
+
+{ ---------- the bytes kept: header and tail ---------- }
+
+const
+  SECTION_STORED = 0;
+  SECTION_CODED = 1;
+
+function VarintLength(v: Int64): Integer;
+begin
+  Result := 1;
+  while v >= 128 do begin v := v shr 7; Inc(Result); end;
+end;
+
+{ len bytes of d: their length, then (when there are any) how they are
+  kept, 1 B, and either the bytes or the coded bytes' length and those;
+  whichever is smaller }
+procedure PutSection(var o: TSink; const d: TBytes; first, len: SizeInt);
+var c: TBytes;
+begin
+  o.PutVarint(len);
+  if len = 0 then Exit;
+  c := PackBytes(d, first, len);
+  if VarintLength(Length(c)) + Length(c) < len then begin
+    o.Put(SECTION_CODED); o.PutVarint(Length(c)); o.PutBytes(c, 0, Length(c));
+  end else begin
+    o.Put(SECTION_STORED); o.PutBytes(d, first, len);
+  end;
+end;
+
+{ the len bytes of a section whose length was read (and checked against
+  the limits): stream version 1 keeps them as they are }
+function GetSection(var src: TSource; ver: Integer; len: Int64; out b: TBytes): Boolean;
+var m, coded: Int64;
+begin
+  b := nil; Result := False;
+  if len = 0 then Exit(True);
+  if ver = 1 then m := SECTION_STORED else m := src.Get;
+  if not src.ok then Exit;
+  case m of
+    SECTION_STORED: begin
+      if len > Length(src.b) - src.p then Exit;
+      b := Copy(src.b, src.p, len); Inc(src.p, len);
+    end;
+    SECTION_CODED: begin
+      coded := src.GetVarint(Length(src.b) - src.p);
+      if not src.ok or (coded < 1) then Exit;
+      SetLength(b, len);
+      UnpackBytes(src.b, src.p, coded, b, 0, len);
+      Inc(src.p, coded);
+    end;
+  else Exit;
+  end;
+  Result := True;
 end;
 
 { ---------- the pixel model ---------- }
@@ -820,7 +876,8 @@ type
     modes: TBytes;                 { HDR: each line's coder }
     side: TBytes;                  { TGA run-length: the packets, coded }
     mode: Integer;                 { one channel of 2-8 bits: samples or indices }
-    hdrFirst, tailSrc, pixFirst: SizeInt;
+    hdr, tail: TBytes;             { the bytes kept: before and after the pixels }
+    pixFirst: SizeInt;
     tailLen: Int64;
     bands: Integer;
     bandFirst, bandLen: array of SizeInt;  { where each band's bytes are in the stream }
@@ -833,15 +890,16 @@ var
 begin
   h.modes := nil; h.side := nil; h.mode := MODE_SAMPLES; h.L.Clear;
   h.bands := 0; h.bandFirst := nil; h.bandLen := nil;
-  h.hdrFirst := 0; h.tailSrc := 0; h.pixFirst := 0; h.tailLen := 0;
+  h.hdr := nil; h.tail := nil; h.pixFirst := 0; h.tailLen := 0;
   if Length(s) = 0 then Exit(dsEmpty);
   src.b := s; src.p := 0; src.ok := True;
   ver := src.Get;
   if ver > STREAM_VERSION then Exit(dsFutureVersion);
-  if ver <> 1 then Exit(dsBadStream);
+  if ver < 1 then Exit(dsBadStream);
   hdrLen := src.GetVarint(MAX_TEXT_HEADER);
-  if not src.ok or (hdrLen > Length(s) - src.p) then Exit(dsBadStream);
-  h.hdrFirst := src.p; Inc(src.p, hdrLen);
+  if not src.ok then Exit(dsBadStream);
+  if hdrLen > maxOut then Exit(dsTooBig);
+  if not GetSection(src, ver, hdrLen, h.hdr) then Exit(dsBadStream);
   f := src.Get;
   if (f <= Ord(Low(TRasterFormat))) or (f > Ord(High(TRasterFormat))) then Exit(dsBadStream);
   h.L.format := TRasterFormat(f);
@@ -871,7 +929,7 @@ begin
     if not src.ok or (sideLen > Length(s) - src.p) then Exit(dsBadStream);
     if (h.L.width < 1) or (h.L.height < 1) or (h.L.width > MAX_DIMENSION) or (h.L.height > MAX_DIMENSION)
        or (h.L.channels < 1) or (h.L.channels > 4) or not (h.L.bits in [1, 2, 4, 8, 16]) then Exit(dsBadStream);
-    if not CodedFits(s, h.hdrFirst, h.L) then Exit(dsBadStream);
+    if not CodedFits(h.hdr, 0, h.L) then Exit(dsBadStream);
     h.side := Copy(s, src.p, sideLen);
     Inc(src.p, sideLen);
     h.L.rowBytes := RawLayout(h.L).rowBytes;
@@ -894,8 +952,10 @@ begin
     end;
   end;
   h.tailLen := src.GetVarint(High(Int64) shr 1);
-  if not src.ok or (h.tailLen > Length(s) - src.p) then Exit(dsBadStream);
-  h.tailSrc := src.p; Inc(src.p, h.tailLen);
+  if not src.ok then Exit(dsBadStream);
+  { the cap before the tail is decoded }
+  if h.tailLen > maxOut - hdrLen then Exit(dsTooBig);
+  if not GetSection(src, ver, h.tailLen, h.tail) then Exit(dsBadStream);
   h.L.bigEndian := (flags and 1) <> 0;
   h.L.isFloat := (flags and 2) <> 0;
   h.L.bottomUp := (flags and 4) <> 0;
@@ -906,7 +966,7 @@ begin
     if h.L.dataLength > maxOut - hdrLen - h.tailLen then Exit(dsTooBig);
   end else begin
     { XWD's rows are as long as its header says }
-    if h.L.format = rfXWD then st := SizeRowsStride(h.L, maxOut - hdrLen - h.tailLen, XwdStride(s, h.hdrFirst, hdrLen))
+    if h.L.format = rfXWD then st := SizeRowsStride(h.L, maxOut - hdrLen - h.tailLen, XwdStride(h.hdr, 0, hdrLen))
     else st := SizeRows(h.L, maxOut - hdrLen - h.tailLen);
     case st of
       psOk: ;
@@ -1142,8 +1202,7 @@ begin
   { everything before the pixels }
   o.Init;
   o.Put(STREAM_VERSION);
-  o.PutVarint(L.dataOffset);
-  o.PutBytes(d, 0, L.dataOffset);
+  PutSection(o, d, 0, L.dataOffset);
   o.Put(Ord(L.format));
   o.PutVarint(L.width); o.PutVarint(L.height); o.PutVarint(L.channels);
   o.Put(L.bits);
@@ -1175,8 +1234,7 @@ begin
     end;
   end;
   tailFirst := L.dataOffset + L.dataLength;
-  o.PutVarint(Length(d) - tailFirst);
-  o.PutBytes(d, tailFirst, Length(d) - tailFirst);
+  PutSection(o, d, tailFirst, Length(d) - tailFirst);
   { what the pixel coder codes: the file's pixels, or a coded file's raw
     pixels (an HDR file's RGBE, a TGA's decoded packets) }
   m := MODE_SAMPLES;
@@ -1233,8 +1291,8 @@ begin
       and (h.L.channels = L.channels) and (h.L.bits = L.bits) and (h.L.bigEndian = L.bigEndian)
       and (h.L.isFloat = L.isFloat) and (h.L.dataOffset = L.dataOffset) and (h.L.dataLength = L.dataLength)
       and (h.L.dataOffset + h.L.dataLength + h.tailLen = Length(d))
-      and SameBytes(s, h.hdrFirst, d, 0, L.dataOffset)
-      and SameBytes(s, h.tailSrc, d, tailFirst, h.tailLen)
+      and SameBytes(h.hdr, 0, d, 0, L.dataOffset)
+      and SameBytes(h.tail, 0, d, tailFirst, h.tailLen)
       and (h.L.coding = L.coding)
       and ((L.coding <> CODING_HDR) or SameBytes(h.modes, 0, modes, 0, L.height))
       and (Length(h.side) = Length(side)) and SameBytes(h.side, 0, side, 0, Length(side));
@@ -1250,9 +1308,9 @@ begin
   Result := ReadStream(s, maxOut, h);
   if Result <> dsOk then Exit;
   SetLength(d, h.L.dataOffset + h.L.dataLength + h.tailLen);
-  if h.L.dataOffset > 0 then Move(s[h.hdrFirst], d[0], h.L.dataOffset);
+  if h.L.dataOffset > 0 then Move(h.hdr[0], d[0], h.L.dataOffset);
   tailFirst := h.L.dataOffset + h.L.dataLength;
-  if h.tailLen > 0 then Move(s[h.tailSrc], d[tailFirst], h.tailLen);
+  if h.tailLen > 0 then Move(h.tail[0], d[tailFirst], h.tailLen);
   { the bands, each from its own bytes, into the pixels (or an HDR file's RGBE) }
   db.n := h.bands; db.mode := h.mode;
   if h.L.coding <> CODING_RAW then begin
@@ -1276,7 +1334,7 @@ begin
     if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
   end else if SideCoded(h.L) then begin
     { the coded pixels again, from the pixels and the coder's choices }
-    if not CodedRebuild(s, h.hdrFirst, db.out_, h.side, h.L, lines) then begin
+    if not CodedRebuild(h.hdr, 0, db.out_, h.side, h.L, lines) then begin
       d := nil; Exit(dsBadStream);
     end;
     if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
