@@ -30,7 +30,8 @@ uses SysUtils;
 
 type
   { new formats go at the end: the stream keeps their number }
-  TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR);
+  TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR,
+    rfFarbfeld, rfTGA, rfSUN, rfWBMP);
 
   TParseStatus = (
     psOk,
@@ -82,6 +83,10 @@ begin
     rfPFM: Result := 'PFM';
     rfBMP: Result := 'BMP';
     rfHDR: Result := 'HDR';
+    rfFarbfeld: Result := 'farbfeld';
+    rfTGA: Result := 'TGA';
+    rfSUN: Result := 'Sun Raster';
+    rfWBMP: Result := 'WBMP';
   else Result := 'none';
   end;
 end;
@@ -104,9 +109,12 @@ begin
      or (L.channels < 1) or (L.channels > MAX_CHANNELS) then Exit(psMalformed);
   { width <= 2^24, channels <= 2^8, bits <= 32: at most 2^37, no overflow }
   bitsPerRow := L.width * L.channels * L.bits;
-  { BMP rows are padded to a multiple of 4 bytes }
-  if L.format = rfBMP then L.rowBytes := ((bitsPerRow + 31) div 32) * 4
+  { rows padded: BMP to 4 bytes, Sun Raster to 2 }
+  case L.format of
+    rfBMP: L.rowBytes := ((bitsPerRow + 31) div 32) * 4;   { 4 bytes }
+    rfSUN: L.rowBytes := ((bitsPerRow + 15) div 16) * 2;   { 2 bytes }
   else L.rowBytes := (bitsPerRow + 7) div 8;
+  end;
   if (available < L.rowBytes) or (L.height > available div L.rowBytes) then Exit(psTruncated);
   L.dataLength := L.rowBytes * L.height;
   Result := psOk;

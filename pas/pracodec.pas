@@ -63,7 +63,7 @@ function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother;
 
 { ---------- byte sink and source ---------- }
 
@@ -683,6 +683,11 @@ begin
   Result := ParsePnm(d, L);
   if Result = psNotThis then Result := ParseBmp(d, L);
   if Result = psNotThis then Result := ParseHdr(d, L);
+  if Result = psNotThis then Result := ParseFarbfeld(d, L);
+  if Result = psNotThis then Result := ParseSun(d, L);
+  { no magic of their own: last, WBMP (which has to fill the file) first }
+  if Result = psNotThis then Result := ParseWbmp(d, L);
+  if Result = psNotThis then Result := ParseTga(d, L);
 end;
 
 { the layouts this version can code }

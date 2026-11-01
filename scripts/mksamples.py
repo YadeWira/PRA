@@ -160,3 +160,44 @@ def hdr(name, w, h, coder, header=b'#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n'):
 hdr('radiance.hdr', 64, 20, radiance_component)
 hdr('stb.hdr', 50, 16, stb_component, b'#?RADIANCE\n# Made with stb_image_write\nFORMAT=32-bit_rle_rgbe\n\n')
 hdr('flat.hdr', 7, 9, None, b'#?RGBE\n\n')
+
+# ---------- farbfeld, TGA, Sun Raster, WBMP ----------
+out = os.path.join(root, 'other'); os.makedirs(out, exist_ok=True)
+w, h = 30, 20
+write('ff_rgba16.ff', b'farbfeld' + struct.pack('>II', w, h) +
+      b''.join(struct.pack('>HHHH', smooth(x, y, 0, 65535), smooth(x, y, 1, 65535), smooth(x, y, 2, 65535), 65535) for y in range(h) for x in range(w)))
+
+def tga(name, imgtype, bpp, pixel, idfield=b'', cmap=b'', cmbits=0, desc=0, footer=False, w=33, h=21):
+    cmtype = 1 if cmap else 0
+    cmlen = len(cmap) // ((cmbits + 7) // 8) if cmap else 0
+    head = struct.pack('<BBBHHBHHHHBB', len(idfield), cmtype, imgtype, 0, cmlen, cmbits, 0, 0, w, h, bpp, desc)
+    data = b''.join(pixel(x, y) for y in range(h) for x in range(w))
+    foot = (b'\x00' * 8 + b'TRUEVISION-XFILE.\x00') if footer else b''
+    write(name, head + idfield + cmap + data + foot)
+
+tga('tga_rgb24.tga', 2, 24, lambda x, y: bytes([smooth(x, y, 2, 255), smooth(x, y, 1, 255), smooth(x, y, 0, 255)]), b'made by mksamples', footer=True)
+tga('tga_bgra32_top.tga', 2, 32, lambda x, y: bytes([smooth(x, y, 2, 255), smooth(x, y, 1, 255), smooth(x, y, 0, 255), 255]), desc=0x28)
+tga('tga_rgb16.tga', 2, 16, lambda x, y: struct.pack('<H', (smooth(x, y, 0, 31) << 10) | (smooth(x, y, 1, 31) << 5) | smooth(x, y, 2, 31)), desc=1)
+tga('tga_gray8.tga', 3, 8, lambda x, y: bytes([smooth(x, y, 0, 255)]))
+tga('tga_mapped8.tga', 1, 8, lambda x, y: bytes([((x // 4) + (y // 3) * 5) % 40]), cmap=bytes(i * 5 % 256 for i in range(40 * 3)), cmbits=24)
+
+def sun(name, depth, rtype, rowfn, w=29, h=17, cmap=b''):
+    rowbytes = ((w * depth + 15) // 16) * 2
+    rows = b''.join(r + bytes(rowbytes - len(r)) for r in (rowfn(y) for y in range(h)))
+    head = struct.pack('>8I', 0x59A66A95, w, h, depth, len(rows), rtype, 1 if cmap else 0, len(cmap))
+    write(name, head + cmap + rows)
+
+sun('ras_bgr24.ras', 24, 1, lambda y: b''.join(bytes([smooth(x, y, 2, 255), smooth(x, y, 1, 255), smooth(x, y, 0, 255)]) for x in range(29)))
+sun('ras_rgb24_t3.ras', 24, 3, lambda y: b''.join(bytes([smooth(x, y, 0, 255), smooth(x, y, 1, 255), smooth(x, y, 2, 255)]) for x in range(29)))
+sun('ras_xbgr32.ras', 32, 1, lambda y: b''.join(bytes([0, smooth(x, y, 2, 255), smooth(x, y, 1, 255), smooth(x, y, 0, 255)]) for x in range(29)))
+sun('ras_mapped8.ras', 8, 1, lambda y: bytes(((x // 3) + y) % 16 for x in range(29)), cmap=bytes(i * 17 % 256 for i in range(48)))
+sun('ras_mono1.ras', 1, 1, lambda y: pack1([1 if (x * y) % 7 < 3 else 0 for x in range(29)]))
+
+def mbi(v):
+    out = [v & 0x7F]; v >>= 7
+    while v: out.append(0x80 | (v & 0x7F)); v >>= 7
+    return bytes(reversed(out))
+w, h = 45, 30
+write('wbmp_shape.wbmp', b'\x00\x00' + mbi(w) + mbi(h) + b''.join(pack1([1 if ((x - 22) ** 2 + (y - 15) ** 2) < 120 else 0 for x in range(w)]) for y in range(h)))
+w, h = 200, 3
+write('wbmp_wide.wbmp', b'\x00\x00' + mbi(w) + mbi(h) + b''.join(pack1([(x // 5 + y) % 2 for x in range(w)]) for y in range(h)))

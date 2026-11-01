@@ -1,4 +1,5 @@
-{ Layer 3: the BMP and Radiance HDR parsers (prabmp, prahdr).
+{ Layer 3: the BMP, Radiance HDR, farbfeld, TGA, Sun Raster and WBMP
+  parsers (prabmp, prahdr, praother).
   - the samples (tests/bmp, tests/hdr): the layout each reports, and for
     HDR the coder found for each line (Radiance's, stb's, flat);
   - hostile headers: each gives its status, never an exception, and a huge
@@ -6,10 +7,10 @@
   - fuzzing: the samples' headers mutated at random: no exception, and on
     psOk the pixels lie inside the file.
 
-    test_parsers <tests/bmp> <tests/hdr> }
+    test_parsers <tests/bmp> <tests/hdr> <tests/other> }
 program test_parsers;
 {$I ../pra.inc}
-uses SysUtils, Classes, Math, praraster, prabmp, prahdr, pracodec;
+uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, pracodec;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
@@ -50,6 +51,20 @@ begin
   Check(st = want, what + ': ' + StatusName(st));
 end;
 
+procedure ExpectTga(const d: TBytes; want: TParseStatus; const what: string);
+var L: TRasterLayout; st: TParseStatus;
+begin
+  st := ParseTga(d, L);
+  Check(st = want, what + ': ' + StatusName(st));
+end;
+
+procedure ExpectSun(const d: TBytes; want: TParseStatus; const what: string);
+var L: TRasterLayout; st: TParseStatus;
+begin
+  st := ParseSun(d, L);
+  Check(st = want, what + ': ' + StatusName(st));
+end;
+
 procedure ExpectHdr(const d: TBytes; want: TParseStatus; const what: string);
 var L: TRasterLayout; st: TParseStatus;
 begin
@@ -65,11 +80,11 @@ begin
 end;
 
 var
-  dirB, dirH: string; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
+  dirB, dirH, dirO: string; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
   i, k, bad, oks: Integer; samples: array of TBytes; hdrText: string;
 begin
   cells := 0; failures := 0; seed := 88172645;
-  dirB := ParamStr(1); dirH := ParamStr(2);
+  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3);
 
   Writeln('BMP samples');
   d := ReadAll(dirB + '/graypal8.bmp'); st := ParseBmp(d, L);
@@ -150,20 +165,65 @@ begin
   ExpectHdr(Bytes(hdrText + '-Y 1 +X 8'#10#2#2#0#8 + #130#5#6#1#2#3#4#5#6 + #136#1 + #136#2 + #136#3),
     psUnsupported, 'a line neither coder writes: unsupported');
 
+  Writeln('farbfeld, TGA, Sun Raster, WBMP');
+  d := ReadAll(dirO + '/ff_rgba16.ff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfFarbfeld) and (L.channels = 4) and (L.bits = 16) and (L.dataOffset = 16),
+    'ff_rgba16.ff: farbfeld, RGBA of 16 bits after 16 bytes');
+  d := ReadAll(dirO + '/tga_rgb24.tga'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfTGA) and (L.channels = 3) and (L.dataOffset = 18 + 17)
+    and (L.dataOffset + L.dataLength = Length(d) - 26), 'tga_rgb24.tga: after its ID field; the footer is the tail');
+  d := ReadAll(dirO + '/tga_bgra32_top.tga'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.channels = 4) and not L.bottomUp, 'tga_bgra32_top.tga: four channels, top-down');
+  d := ReadAll(dirO + '/tga_rgb16.tga'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 16) and (L.channels = 1) and not L.bigEndian, 'tga_rgb16.tga: one 16-bit little-endian sample');
+  d := ReadAll(dirO + '/tga_mapped8.tga'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 8) and (L.dataOffset = 18 + 120), 'tga_mapped8.tga: indices after the 120-byte colour map');
+  d := ReadAll(dirO + '/ras_bgr24.ras'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfSUN) and (L.rowBytes = 88), 'ras_bgr24.ras: Sun, rows of 87 bytes padded to 88');
+  d := ReadAll(dirO + '/ras_mono1.ras'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 1) and (L.rowBytes = 4), 'ras_mono1.ras: 1 bit, rows padded to 16 bits');
+  d := ReadAll(dirO + '/ras_mapped8.ras'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.dataOffset = 32 + 48), 'ras_mapped8.ras: after the colour map');
+  d := ReadAll(dirO + '/wbmp_wide.wbmp'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfWBMP) and (L.width = 200) and (L.dataOffset = 5), 'wbmp_wide.wbmp: width 200 in two bytes');
+  d := ReadAll(dirO + '/tga_gray8.tga');
+  ExpectTga(WithU16(d, 12, 0), psNotThis, 'TGA, width 0');
+  d[2] := 10; ExpectTga(d, psUnsupported, 'TGA, run-length (type 10)');
+  d[2] := 7; ExpectTga(d, psNotThis, 'TGA, type 7');
+  d := ReadAll(dirO + '/tga_gray8.tga'); d[16] := 12;
+  ExpectTga(d, psNotThis, 'TGA, 12 bits a pixel');
+  d := ReadAll(dirO + '/tga_gray8.tga');
+  ExpectTga(Copy(d, 0, Length(d) - 1), psTruncated, 'TGA one byte short');
+  d := ReadAll(dirO + '/ras_bgr24.ras');
+  ExpectSun(Copy(d, 0, 20), psMalformed, 'Sun, cut inside the header');
+  ExpectSun(Copy(d, 0, Length(d) - 1), psTruncated, 'Sun one byte short');
+  d[23] := 2; ExpectSun(d, psUnsupported, 'Sun, run-length (type 2)');
+  d[23] := 1; d[15] := 7; ExpectSun(d, psMalformed, 'Sun, depth 7');
+  d := ReadAll(dirO + '/ff_rgba16.ff');
+  Check(ParseFarbfeld(Copy(d, 0, Length(d) - 1), L) = psTruncated, 'farbfeld one byte short: truncated');
+  Check(ParseFarbfeld(Copy(d, 0, 12), L) = psMalformed, 'farbfeld cut inside the header: malformed');
+  d := ReadAll(dirO + '/wbmp_shape.wbmp');
+  Check(ParseWbmp(Copy(d, 0, Length(d) - 1), L) = psNotThis, 'WBMP one byte short: not a WBMP (its signature is weak)');
+  Check(ParseWbmp(Bytes(#0#0#$FF#$FF#$FF#$FF#$7F#1), L) = psNotThis, 'WBMP, a width of 5 bytes');
+
   Writeln('fuzzing');
   samples := nil;
-  for k := 0 to 3 do begin
+  for k := 0 to 7 do begin
     SetLength(samples, Length(samples) + 1);
     case k of
       0: samples[High(samples)] := ReadAll(dirB + '/palette8.bmp');
       1: samples[High(samples)] := ReadAll(dirB + '/bgra32.bmp');
       2: samples[High(samples)] := ReadAll(dirH + '/radiance.hdr');
-    else samples[High(samples)] := ReadAll(dirH + '/stb.hdr');
+      3: samples[High(samples)] := ReadAll(dirH + '/stb.hdr');
+      4: samples[High(samples)] := ReadAll(dirO + '/tga_mapped8.tga');
+      5: samples[High(samples)] := ReadAll(dirO + '/ras_mapped8.ras');
+      6: samples[High(samples)] := ReadAll(dirO + '/ff_rgba16.ff');
+    else samples[High(samples)] := ReadAll(dirO + '/wbmp_shape.wbmp');
     end;
   end;
   bad := 0; oks := 0;
   for i := 1 to 20000 do begin
-    d := Copy(samples[i mod 4], 0, Length(samples[i mod 4]));
+    d := Copy(samples[i mod 8], 0, Length(samples[i mod 8]));
     if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
     for k := 1 to 1 + Integer(Rand mod 3) do
       if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 120)))] := Byte(Rand);
@@ -177,8 +237,8 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, Format('20000 mutated BMP and HDR headers: no exception, pixels inside (%d ok)', [oks]));
+  Check(bad = 0, Format('20000 mutated headers of 6 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 45) then Halt(1);
+  if (failures > 0) or (cells < 65) then Halt(1);
 end.
