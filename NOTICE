@@ -5,8 +5,11 @@ Licensed under the MIT License (see LICENSE).
 Code shared with PJA
 --------------------
 
-pas/praarith.pas (binary arithmetic coder), pas/prablake3.pas (BLAKE3) and
-pas/collisions.py come from PJA (github.com/YadeWira/PJA, MIT, same author).
+pas/praarith.pas (binary arithmetic coder), pas/prablake3.pas (BLAKE3),
+pas/praformat.pas (the container), pas/prafs.pas (verified writing),
+pas/pracpu.pas, pas/pracli.pas (the command, adapted), pas/collisions.py and
+the tests of those units (test_arith, test_blake3, test_format, test_prafs,
+cli.sh, adapted) come from PJA (github.com/YadeWira/PJA, MIT, same author).
 BLAKE3 follows its specification (github.com/BLAKE3-team/BLAKE3-specs).
 
 packPNM

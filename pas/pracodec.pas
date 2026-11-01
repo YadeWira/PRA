@@ -36,6 +36,7 @@ uses SysUtils, praraster;
 
 const
   STREAM_VERSION = 1;
+  PRA_VERSION = '0.1.0';
 
 type
   TDecodeStatus = (dsOk, dsEmpty, dsFutureVersion, dsBadStream, dsTooBig);

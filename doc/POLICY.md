@@ -8,6 +8,9 @@ a file the writer accepts is a file the reader accepts.
 |---|---|---|
 | `MAX_DIMENSION` | 2^24 pixels a side | Far above any real image, and it keeps `width * channels * bits` below 2^37, so a row's size never overflows. |
 | `MAX_CHANNELS` | 256 | PAM's DEPTH is free; real files use 1 to 4. |
+| `MIN_PAYLOAD` | 13 bytes | The smallest codec stream: no `.pra` payload can be smaller. |
+| `MAX_EXPANSION_RATIO` | 65,536 | How many times its payload a declared original may be, checked before decoding. The coder's probabilities stop at 1/4096, so a decision costs at least 0.00035 bits: a blank 8-bit image compresses about 6,000:1 at most, a blank PBM about 23,000:1. |
+| `--max-output` | 256 MiB by default | The user's own cap on what `x` decodes. |
 | `MAX_TEXT_HEADER` | 1 MiB | A Netpbm header is a few dozen bytes; comments can make it bigger, but not this big. A header that does not end inside it is malformed. |
 
 ## What a parser promises

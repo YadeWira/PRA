@@ -8,8 +8,17 @@ The spiritual successor of [packPNM](https://github.com/YadeWira/packRAW):
 written from scratch, with a codec and container of its own; it shares no
 code with packPNM and does not read its files.
 
+```sh
+pra a image.ppm          # -> image.pra
+pra x image.pra          # -> image.ppm, the same file byte for byte
+pra list image.pra       # original size, stored size, hash
+```
+
 The original comes back **byte for byte**, and nothing is written unless it
-verified.
+verified: `a` decompresses its own result and compares it with the input
+first, and `x` checks the size and the BLAKE3 hash the `.pra` carries.
+Today PRA takes binary PBM, PGM, PPM, PAM and PFM; see
+[doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
 
@@ -22,11 +31,12 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | more parsers | | BMP, HDR, then [the list](doc/FORMATS.md) |
 | model (counters, mixers, APM) | `pas/pramodel.pas` | first version |
 | codec stream (version 1) | `pas/pracodec.pas` | first version: 8.8% smaller than packPNM on the files both take |
-| container | | |
-| command line | | |
+| container (`.pra`) | `pas/praformat.pas`, `pas/prapack.pas`, `pas/prafs.pas` | done ([doc/FORMAT.md](doc/FORMAT.md)) |
+| command line (`pra`) | `pas/pracli.pas` | done ([doc/CLI.md](doc/CLI.md)) |
 
 ```sh
-./run_tests.sh      # needs Free Pascal 3.2.2 and python3
+./run_tests.sh      # needs Free Pascal 3.2.2 and python3; builds and tests everything
+fpc -O3 -dPRA_FAST -Fupas -Fipas -FUbuild -obuild/pra pas/pracli.pas   # just the command
 ```
  See [doc/FORMATS.md](doc/FORMATS.md) for the target
 formats.

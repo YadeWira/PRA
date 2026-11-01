@@ -1,4 +1,7 @@
-# Every platform PRA supports runs the same check (.github/test.sh).
+# Every platform PRA supports runs the same check (.github/test.sh) and
+# records the SHA-256 of the .pra files it wrote; the last job checks that
+# they are the same bytes everywhere. Linux x86-64 also runs the full suite
+# (pas/run_tests.sh), which needs a Unix filesystem.
 name: CI
 
 on:
@@ -23,6 +26,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fpc
       - name: Test
         run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-linux-x64
+          path: hash.txt
+
+  linux-x64-suite:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: pas/run_tests.sh
+        run: ./run_tests.sh
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -32,6 +48,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fpc
       - name: Test
         run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-linux-arm64
+          path: hash.txt
 
   linux-x86:
     runs-on: ubuntu-24.04
@@ -48,6 +68,10 @@ jobs:
         env:
           FPC: /tmp/fpc-i386/fpc
         run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-linux-x86
+          path: hash.txt
 
   macos-arm64:
     runs-on: macos-latest
@@ -57,6 +81,10 @@ jobs:
         run: brew install fpc
       - name: Test
         run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-macos-arm64
+          path: hash.txt
 
   windows-x64:
     runs-on: windows-latest
@@ -76,6 +104,10 @@ jobs:
         env:
           FPC: fpc -Px86_64
         run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-windows-x64
+          path: hash.txt
 
   windows-x86:
     runs-on: windows-latest
@@ -95,3 +127,24 @@ jobs:
         env:
           FPC: fpc -Pi386
         run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-windows-x86
+          path: hash.txt
+
+  determinism:
+    needs: [linux-x64, linux-arm64, linux-x86, macos-arm64, windows-x64, windows-x86]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hash-*
+      - name: Compare the .pra files' hashes
+        run: |
+          for f in hash-*/*; do echo "$f: $(cat "$f")"; done
+          n=$(cat hash-*/* | sort -u | wc -l)
+          if [ "$n" -ne 1 ]; then
+            echo "the .pra files differ between platforms" >&2
+            exit 1
+          fi
+          echo "the same .pra files on every platform"

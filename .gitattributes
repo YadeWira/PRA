@@ -1,0 +1,4 @@
+# the samples are binary: never convert their line endings
+tests/** binary
+pas/tests/kat.txt -text
+*.sh text eol=lf
