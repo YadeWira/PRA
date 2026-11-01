@@ -340,3 +340,66 @@ sgi('sgi_rle_rows.rgb', 1, 33, 17, 3, sv, True)
 sgi('sgi_rle_ymajor.rgb', 1, 30, 15, 4, sv, True, ymajor=True)
 sgi('sgi_rle_gray.bw', 1, 40, 12, 1, lambda x, y, z: flat(x, y, 0) // 16 * 16, True, randomly=True)
 sgi('sgi_rle16.sgi', 2, 18, 10, 3, lambda x, y, z: 3000 if 5 <= x < 12 else smooth(x, y, z, 65535), True, ymajor=True)
+
+# XWD: big- and little-endian headers, rows longer than their pixels, a
+# colour map, a bitmap (XYBitmap, one plane)
+def xwd(name, be, fmt, depth, bpp, w, h, bpl, rowfn, ncolors=0, xname=b'xwd sample\0', order=1, tail=b''):
+    e = '>' if be else '<'
+    hs = 100 + len(xname)
+    head = struct.pack(e + '25I', hs, 7, fmt, depth, w, h, 0, order, 32 if bpp > 8 else 8, 1, 32, bpp, bpl,
+                       4 if bpp > 8 else 3, 0xFF0000 if bpp > 8 else 0, 0xFF00 if bpp > 8 else 0, 0xFF if bpp > 8 else 0,
+                       8, ncolors, ncolors, w, h, 0, 0, 0) + xname
+    cmap = b''.join(struct.pack(e + 'IHHHBB', i, i * 257, (i * 3 % 256) * 257, (255 - i) * 257, 7, 0) for i in range(ncolors))
+    rows = b''.join(r + bytes(bpl - len(r)) for r in (rowfn(y) for y in range(h)))
+    write(name, head + cmap + rows + tail)
+
+xwd('xwd_rgb32_be.xwd', True, 2, 24, 32, 27, 19, 27 * 4 + 8,
+    lambda y: b''.join(bytes([0, smooth(x, y, 0, 255), smooth(x, y, 1, 255), smooth(x, y, 2, 255)]) for x in range(27)))
+xwd('xwd_mapped8_le.xwd', False, 2, 8, 8, 31, 17, 32, lambda y: bytes(((x // 3) + y) % 24 for x in range(31)), ncolors=24, order=0)
+xwd('xwd_bitmap.xwd', True, 0, 1, 1, 50, 21, 8, lambda y: pack1([1 if (x + 2 * y) % 9 < 4 else 0 for x in range(50)]), ncolors=2)
+
+# MTV: "width height\n" and R, G, B; one with a byte after the pixels
+w, h = 26, 18
+mtv = lambda: b''.join(bytes([smooth(x, y, 0, 255), smooth(x, y, 1, 255), smooth(x, y, 2, 255)]) for y in range(h) for x in range(w))
+write('mtv_rgb.mtv', b'%d %d\n' % (w, h) + mtv())
+write('mtv_tail.mtv', b'%d %d\n' % (w, h) + mtv() + b'\n')
+
+# VIFF: a band's plane after another, big- and little-endian, a colour map
+def viff(name, be, w, h, bands, storage, plane, mapbytes=b'', maprow=0, mapcol=0):
+    e = '>' if be else '<'
+    head = bytes([0xAB, 1, 1, 3, 2 if be else 8, 0, 0, 0]) + b'synthetic'.ljust(512, b'\0')
+    head += struct.pack(e + '5I', w, h, 0, 0xFFFFFFFF, 0xFFFFFFFF) + struct.pack(e + '2f', 1.0, 1.0)
+    head += struct.pack(e + '15I', 1, 0, 1, bands, storage, 0, 1 if mapbytes else 0, 1 if mapbytes else 0,
+                        maprow, mapcol, 0, 2 if mapbytes else 0, 0, 15 if bands == 3 else 0, 0)
+    head = head.ljust(1024, b'\0')
+    write(name, head + mapbytes + b''.join(plane(b) for b in range(bands)))
+
+viff('viff_rgb_be.viff', True, 23, 15, 3, 1, lambda b: bytes(smooth(x, y, b, 255) for y in range(15) for x in range(23)))
+viff('viff_gray16_le.xv', False, 21, 13, 1, 2, lambda b: b''.join(struct.pack('<H', smooth(x, y, 0, 65535)) for y in range(13) for x in range(21)))
+viff('viff_mapped.xv', False, 28, 16, 1, 1, lambda b: bytes(((x // 4) + y) % 20 for y in range(16) for x in range(28)),
+     mapbytes=bytes(i * 13 % 256 for i in range(3 * 20)), maprow=3, mapcol=20)
+
+# VIPS: 64-byte header, pixels, then the metadata (XML)
+def vips(name, be, w, h, bands, fmt, data, xml=b''):
+    e = '>' if be else '<'
+    magic = b'\x08\xf2\xa6\xb6' if be else b'\xb6\xa6\xf2\x08'
+    head = magic + struct.pack(e + '7I2f', w, h, bands, 8, fmt, 0, 22, 1.0, 1.0) + struct.pack(e + 'IHHII', 0, 0, 0, 0, 0)
+    write(name, head.ljust(64, b'\0') + data + xml)
+
+vips('vips_rgb_be.v', True, 25, 16, 3, 0, raster(25, 16, 3, 255, False),
+     b'<?xml version="1.0"?>\n<root xmlns="http://www.vips.ecs.soton.ac.uk/vips/8.7.0"><header/></root>\n')
+vips('vips_gray16_le.v', False, 19, 14, 1, 2, b''.join(struct.pack('<H', smooth(x, y, 0, 65535)) for y in range(14) for x in range(19)))
+
+# DDS, uncompressed: 32-bit, two byte channels (A8L8), a volume, mipmaps
+def dds(name, w, h, bits, masks, data, depth=0, mips=0, caps2=0, pfflags=0x41, fourcc=0):
+    head = b'DDS ' + struct.pack('<7I', 124, 0x100F | (0x20000 if mips else 0) | (0x800000 if depth else 0),
+                                 h, w, (w * bits + 7) // 8, depth, mips) + bytes(44)
+    head += struct.pack('<8I', 32, pfflags, fourcc, bits, *masks) + struct.pack('<5I', 0x1000, caps2, 0, 0, 0)
+    write(name, head + data)
+
+dds('dds_bgra32.dds', 22, 14, 32, (0xFF0000, 0xFF00, 0xFF, 0xFF000000), raster(22, 14, 4, 255, False))
+dds('dds_a8l8.dds', 20, 12, 16, (0xFF, 0, 0, 0xFF00), raster(20, 12, 2, 255, False), pfflags=0x20001)
+dds('dds_volume.dds', 12, 8, 24, (0xFF0000, 0xFF00, 0xFF, 0), raster(12, 24, 3, 255, False), depth=3, caps2=0x200000, pfflags=0x40)
+dds('dds_mips.dds', 16, 16, 32, (0xFF0000, 0xFF00, 0xFF, 0xFF000000),
+    raster(16, 16, 4, 255, False) + raster(8, 8, 4, 255, False) + raster(4, 4, 4, 255, False)
+    + raster(2, 2, 4, 255, False) + raster(1, 1, 4, 255, False), mips=5)

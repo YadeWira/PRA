@@ -39,7 +39,7 @@ for f in tests/pnm/* tests/bmp/* tests/hdr/* tests/other/*; do
   n=$((n + 1))
   cmp -s "$f" "$OUT/x/$(basename "$f")" || { echo "FAIL: $(basename "$f") does not come back"; exit 1; }
 done
-[ "$n" -ge 55 ] || { echo "FAIL: only $n samples"; exit 1; }
+[ "$n" -ge 69 ] || { echo "FAIL: only $n samples"; exit 1; }
 echo "$n samples back byte for byte"
 
 echo "== the .pra files"

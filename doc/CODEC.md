@@ -51,8 +51,15 @@ copy of its bytes: what the arithmetic decoder reads past a band's end is
 zeros, exactly as when the encoder's verifier decoded it.
 
 Format numbers: 1 PBM, 2 PGM, 3 PPM, 4 PAM, 5 PFM, 6 BMP, 7 HDR, 8 farbfeld,
-9 TGA, 10 Sun Raster, 11 WBMP, 12 PCX, 13 SGI. New formats take the next
-number; a number never changes meaning.
+9 TGA, 10 Sun Raster, 11 WBMP, 12 PCX, 13 SGI, 14 XWD, 15 MTV, 16 VIFF,
+17 VIPS, 18 DDS. New formats take the next number; a number never changes
+meaning.
+
+What the stream does not say, the format does: an SGI file without the
+run-length flag, and a VIFF file of more than one band, keep their channels
+as planes one after the other (interleaved for the model, `prarle`); an
+XWD file's rows are as long as its header's bytes_per_line (`XwdStride`),
+at most `MAX_ROW_PAD` bytes past their pixels.
 
 The decoder checks the layout against the limits (`pralimits`) and against
 the caller's cap on the output size **before** decoding anything.
@@ -123,7 +130,8 @@ run-length TGAs; this way, all 10.
 - SGI: per-row packets with a zero at the end, and the tables of where each
   row is: rebuilt from the rows when they lie one after the other right
   after the tables (every file of the corpus), their order coded as steps.
-  SGI's planes (verbatim too) are interleaved as channels.
+  SGI's planes (verbatim too) are interleaved as channels, and so are a
+  VIFF file's bands.
 
 **Radiance HDR.** The scanlines are decoded to RGBE (four 8-bit channels,
 green first, red and blue against it, the exponent last) and each line's
@@ -256,6 +264,16 @@ not fit its declared size. Some: a 33 MB TGA 11.8%, abydos.ff 2.9%,
 BUGLE.PCX 7.6%, a 17 MB 24-bit PCX 32.6%; sample_1920x1280.sgi
 (run-length) 2,743,857 against 2,731,248 for the same pixels as a PPM: its
 coder's choices and row order cost 0.4%.
+
+### 01/11/2026: XWD, MTV, VIFF, VIPS, uncompressed DDS
+
+42 files of the local corpus, 31.7 MB, 25.35% after compression; every one
+back byte for byte. Left out: the 8 DDS files whose surfaces are DXT/BC
+compressed, and ddsMIPChain's 15 files (headerless DXT, not DDS). Some:
+fig41.xwd (8-bit, rows padded) 1.2%, abydos.viff (four planes) 4.8%, the
+same image as MTV 5.9%, test.v 19.1%. A small file pays for its header,
+kept as it is: input.viff (70 x 46, a 1024-byte header and a 768-byte
+map) is 4,079 bytes against xz's 3,124.
 
 ### 01/11/2026: against packPNM 1.6d, the whole corpus
 

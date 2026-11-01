@@ -29,9 +29,9 @@ work in place).
 | Sun Raster | raw / RLE | sunRaster 12 | **done** |
 | ICO / CUR | DIB (reuses BMP) | ico 15, cur 15, icoOS2 12 | |
 | WBMP | 1-bit raw | wirelessBMP 10 | **done** |
-| XWD | raw | xwd 11 | |
-| MTV, VIFF, VIPS | raw | mtv 11, viff 13, vips 1 | |
-| DDS uncompressed | raw (BCn is separate) | dds 16, ddsMIPChain 15 | |
+| XWD | raw | xwd 11 | **done** (either byte order, rows as long as the header says) |
+| MTV, VIFF, VIPS | raw | mtv 11, viff 13, vips 1 | **done** (VIFF: one image, its bands as planes) |
+| DDS uncompressed | raw (BCn is separate) | dds 16, ddsMIPChain 15 | **done**: the main surface (a volume's slices too); mipmaps and a cube map's other faces stay in the tail until several images a file. DXT/BC: not raw pixels. ddsMIPChain holds headerless DXT chains, not DDS files |
 
 ## Batch 2: film and science, high bit depth
 

@@ -687,7 +687,13 @@ begin
   if Result = psNotThis then Result := ParseSun(d, L);
   if Result = psNotThis then Result := ParsePcx(d, L);
   if Result = psNotThis then Result := ParseSgi(d, L);
-  { no magic of their own: last, WBMP (which has to fill the file) first }
+  if Result = psNotThis then Result := ParseVips(d, L);
+  if Result = psNotThis then Result := ParseDds(d, L);
+  if Result = psNotThis then Result := ParseViff(d, L);
+  { no magic of their own: last, those whose fields say most first, those
+    that have to fill the file (MTV, WBMP) before TGA }
+  if Result = psNotThis then Result := ParseXwd(d, L);
+  if Result = psNotThis then Result := ParseMtv(d, L);
   if Result = psNotThis then Result := ParseWbmp(d, L);
   if Result = psNotThis then Result := ParseTga(d, L);
 end;
@@ -727,7 +733,7 @@ end;
 
 function SideCoded(const L: TRasterLayout): Boolean;
 begin
-  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_SGI_RAW];
+  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES];
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
@@ -741,7 +747,7 @@ begin
     CODING_SUN_RLE: Result := ByteRleScan(brSun, d, L.dataOffset, R.dataLength, R.rowBytes, raw, side, used) = psOk;
     CODING_SGI_RLE: Result := SgiRleScan(d, L.dataOffset, L.width, L.height, L.channels, L.bits div 8,
                                          raw, side, used) = psOk;
-    CODING_SGI_RAW: begin
+    CODING_PLANES: begin
       used := R.dataLength;
       Result := L.dataOffset + used <= Length(d);
       if Result then raw := SgiToPixels(Copy(d, L.dataOffset, used), L.width, L.height, L.channels, L.bits div 8);
@@ -767,7 +773,7 @@ begin
     CODING_TGA_RLE: Result := TgaRleRebuild(raw, side, L, PixelBytes(L), L.dataLength, coded);
     CODING_SUN_RLE: Result := ByteRleRebuild(brSun, raw, side, R.rowBytes, L.dataLength, coded);
     CODING_SGI_RLE: Result := SgiRleRebuild(raw, side, L.width, L.height, L.channels, L.bits div 8, L.dataLength, coded);
-    CODING_SGI_RAW: begin
+    CODING_PLANES: begin
       coded := SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8);
       Result := Length(coded) = L.dataLength;
     end;
@@ -790,7 +796,7 @@ begin
     CODING_SUN_RLE: Result := ByteRleFits(brSun, R.dataLength, L.dataLength);
     CODING_SGI_RLE: Result := (L.bits in [8, 16])
       and SgiRleFits(L.width, L.height, L.channels, L.bits div 8, L.dataLength);
-    CODING_SGI_RAW: Result := (L.bits in [8, 16]) and (L.dataLength = R.dataLength) and (R.dataLength <= MAX_RAW);
+    CODING_PLANES: Result := (L.bits in [8, 16]) and (L.dataLength = R.dataLength) and (R.dataLength <= MAX_RAW);
     CODING_PCX: begin
       { the pixels' layout has to be the one the header gives (PcxFromPixels
         reads them by it), and the decoded lines have to fit }
@@ -823,6 +829,7 @@ type
 function ReadStream(const s: TBytes; maxOut: Int64; out h: TStreamHead): TDecodeStatus;
 var
   src: TSource; hdrLen, run, y, rest, sideLen: Int64; flags, f, ver, m, k: Integer; Lp: TRasterLayout;
+  st: TParseStatus;
 begin
   h.modes := nil; h.side := nil; h.mode := MODE_SAMPLES; h.L.Clear;
   h.bands := 0; h.bandFirst := nil; h.bandLen := nil;
@@ -852,7 +859,8 @@ begin
     rfPCX: h.L.coding := CODING_PCX;
     rfTGA: if (flags and 8) <> 0 then h.L.coding := CODING_TGA_RLE;
     rfSUN: if (flags and 8) <> 0 then h.L.coding := CODING_SUN_RLE;
-    rfSGI: if (flags and 8) <> 0 then h.L.coding := CODING_SGI_RLE else h.L.coding := CODING_SGI_RAW;
+    rfSGI: if (flags and 8) <> 0 then h.L.coding := CODING_SGI_RLE else h.L.coding := CODING_PLANES;
+    rfVIFF: if h.L.channels > 1 then h.L.coding := CODING_PLANES;
   end;
   if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE]) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
@@ -896,12 +904,16 @@ begin
   if hdrLen + h.tailLen > maxOut then Exit(dsTooBig);
   if h.L.coding <> CODING_RAW then begin
     if h.L.dataLength > maxOut - hdrLen - h.tailLen then Exit(dsTooBig);
-  end else
-    case SizeRows(h.L, maxOut - hdrLen - h.tailLen) of
+  end else begin
+    { XWD's rows are as long as its header says }
+    if h.L.format = rfXWD then st := SizeRowsStride(h.L, maxOut - hdrLen - h.tailLen, XwdStride(s, h.hdrFirst, hdrLen))
+    else st := SizeRows(h.L, maxOut - hdrLen - h.tailLen);
+    case st of
       psOk: ;
       psTruncated: Exit(dsTooBig);
     else Exit(dsBadStream);
     end;
+  end;
   if not Codable(h.L) then Exit(dsBadStream);
   if HasMode(h.L) then begin
     h.mode := src.Get;

@@ -31,7 +31,7 @@ uses SysUtils;
 type
   { new formats go at the end: the stream keeps their number }
   TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR,
-    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX, rfSGI);
+    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX, rfSGI, rfXWD, rfMTV, rfVIFF, rfVIPS, rfDDS);
 
   TParseStatus = (
     psOk,
@@ -49,7 +49,8 @@ const
   CODING_SUN_RLE = 3;   { Sun Raster type 2 (prarle) }
   CODING_PCX = 4;       { PCX (prarle, its planes: praother) }
   CODING_SGI_RLE = 5;   { SGI run-length (prarle) }
-  CODING_SGI_RAW = 6;   { SGI verbatim: planes, interleaved for the codec (prarle) }
+  CODING_PLANES = 6;    { verbatim, the channels' planes one after the other
+                          (SGI, VIFF): interleaved for the codec (prarle) }
 
 type
   TRasterLayout = record
@@ -74,6 +75,9 @@ function StatusName(s: TParseStatus): string;
   pixels do not fit in the `available` bytes after dataOffset. Never
   overflows: every product is checked against `available` first. }
 function SizeRows(var L: TRasterLayout; available: Int64): TParseStatus;
+{ the same, with rows of `stride` bytes that the header gives (XWD's
+  bytes_per_line): psMalformed if a row's samples do not fit in it }
+function SizeRowsStride(var L: TRasterLayout; available, stride: Int64): TParseStatus;
 
 implementation
 
@@ -102,6 +106,11 @@ begin
     rfWBMP: Result := 'WBMP';
     rfPCX: Result := 'PCX';
     rfSGI: Result := 'SGI';
+    rfXWD: Result := 'XWD';
+    rfMTV: Result := 'MTV';
+    rfVIFF: Result := 'VIFF';
+    rfVIPS: Result := 'VIPS';
+    rfDDS: Result := 'DDS';
   else Result := 'none';
   end;
 end;
@@ -133,6 +142,17 @@ begin
   if (available < L.rowBytes) or (L.height > available div L.rowBytes) then Exit(psTruncated);
   L.dataLength := L.rowBytes * L.height;
   Result := psOk;
+end;
+
+function SizeRowsStride(var L: TRasterLayout; available, stride: Int64): TParseStatus;
+begin
+  Result := SizeRows(L, available);
+  if (Result <> psOk) and (Result <> psTruncated) then Exit;
+  if (stride < L.rowBytes) or (stride - L.rowBytes > MAX_ROW_PAD) then Exit(psMalformed);
+  if Result = psTruncated then Exit;
+  L.rowBytes := stride;
+  if L.height > available div L.rowBytes then Exit(psTruncated);
+  L.dataLength := L.rowBytes * L.height;
 end;
 
 end.

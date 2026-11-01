@@ -26,7 +26,23 @@
     channels.
   - WBMP type 0: two zero bytes, width and height as multi-byte integers
     (7 bits a byte, the high bit set on all but the last), then 1-bit rows
-    padded to a byte. }
+    padded to a byte.
+  - XWD (X11 window dump, version 7): a header of 32-bit fields (in either
+    byte order: the version, 7, tells which) and a name, a colour map of
+    12-byte entries, then the rows, bytes_per_line bytes each (which the
+    stream does not keep: the decoder reads it from the header). 1, 4, 8,
+    16 (one sample, in the file's byte order), 24 or 32 bits a pixel.
+  - MTV (MTV ray tracer): "width height\n", then R, G, B. A text header of
+    two numbers is a weak signature: the pixels have to fill the file.
+  - VIFF (Khoros): $AB 1, a 1024-byte header, a colour map, then each band
+    (channel) as a plane of its own, verbatim: bits, bytes, 16-bit values
+    or (one band) 32-bit floats, in the byte order the header names.
+  - VIPS: magic 08 F2 A6 B6 (big-endian) or B6 A6 F2 08 (little), a 64-byte
+    header, the pixels interleaved, then the metadata (XML): the tail.
+  - DDS, uncompressed: "DDS ", a 124-byte header, then the main surface (a
+    volume's slices one under the other); its mipmaps and a cube map's
+    other faces stay in the tail. Compressed surfaces (DXT, BC) are not
+    raw pixels: PRA leaves them. }
 unit praother;
 
 {$I pra.inc}
@@ -43,6 +59,15 @@ function ParseSun(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseWbmp(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParsePcx(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseSgi(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseXwd(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseMtv(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseViff(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseVips(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseDds(const d: TBytes; out L: TRasterLayout): TParseStatus;
+
+{ XWD: the bytes a row takes, from its header (at hdr[first..first+len));
+  -1 if that is not an XWD header }
+function XwdStride(const hdr: TBytes; first, len: SizeInt): Int64;
 
 { PCX: what its 128-byte header (at hdr[first..]) says of the planes: bits a
   pixel in a plane, planes, bytes a plane's line, lines. False if it is not
@@ -67,6 +92,12 @@ begin Result := d[i] or (d[i + 1] shl 8); end;
 
 function U32BE(const d: TBytes; i: SizeInt): Int64;
 begin Result := (Int64(d[i]) shl 24) or (Int64(d[i + 1]) shl 16) or (Int64(d[i + 2]) shl 8) or Int64(d[i + 3]); end;
+
+function U32LE(const d: TBytes; i: SizeInt): Int64;
+begin Result := (Int64(d[i + 3]) shl 24) or (Int64(d[i + 2]) shl 16) or (Int64(d[i + 1]) shl 8) or Int64(d[i]); end;
+
+function U32(const d: TBytes; i: SizeInt; be: Boolean): Int64;
+begin if be then Result := U32BE(d, i) else Result := U32LE(d, i); end;
 
 function Finish(const d: TBytes; var L: TRasterLayout): TParseStatus;
 begin
@@ -325,7 +356,7 @@ begin
   L.bottomUp := True;
   L.dataOffset := 512;
   if storage = 0 then begin
-    L.coding := CODING_SGI_RAW;
+    L.coding := CODING_PLANES;
     size := Int64(xs) * ys * zs * bpc;
     if size > Length(d) - 512 then begin L.format := rfNone; Exit(psTruncated); end;
     L.dataLength := size;
@@ -337,6 +368,225 @@ begin
   if Result <> psOk then begin L.format := rfNone; Exit; end;
   L.dataLength := used;
   L.rowBytes := Int64(xs) * zs * bpc;
+end;
+
+{ ---------- XWD ---------- }
+
+{ the header's byte order: the version (7) is the second field }
+function XwdOrder(const d: TBytes; first: SizeInt; out be: Boolean): Boolean;
+begin
+  be := U32BE(d, first + 4) = 7;
+  Result := be or (U32LE(d, first + 4) = 7);
+end;
+
+function XwdStride(const hdr: TBytes; first, len: SizeInt): Int64;
+var be: Boolean;
+begin
+  Result := -1;
+  if (first < 0) or (len < 100) or (first + len > Length(hdr)) or not XwdOrder(hdr, first, be) then Exit;
+  Result := U32(hdr, first + 48, be);
+end;
+
+function ParseXwd(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var be: Boolean; hs, fmt, depth, order, bpp, ncolors: Int64;
+
+  function F(k: Integer): Int64;
+  begin Result := U32(d, 4 * k, be); end;
+
+begin
+  L.Clear;
+  if (Length(d) < 100) or not XwdOrder(d, 0, be) then Exit(psNotThis);
+  hs := F(0); fmt := F(2); depth := F(3); order := F(7); bpp := F(11); ncolors := F(19);
+  { no magic: the version and plausible fields }
+  if (hs < 100) or (fmt > 2) or (depth < 1) or (depth > 32) or (order > 1) then Exit(psNotThis);
+  if (hs > MAX_TEXT_HEADER) or (ncolors > 65536) then Exit(psUnsupported);
+  { XY formats: a plane after another; one plane is a bitmap like Z's }
+  if (fmt < 2) and (depth <> 1) then Exit(psUnsupported);
+  L.format := rfXWD;
+  L.width := F(4); L.height := F(5);
+  L.bigEndian := order = 1;
+  case bpp of
+    1, 4, 8, 16: begin L.channels := 1; L.bits := bpp; end;
+    24: begin L.channels := 3; L.bits := 8; end;
+    32: begin L.channels := 4; L.bits := 8; end;
+  else begin L.format := rfNone; Exit(psUnsupported); end;
+  end;
+  L.maxval := (Int64(1) shl L.bits) - 1;
+  L.dataOffset := hs + 12 * ncolors;
+  if L.dataOffset > Length(d) then begin L.format := rfNone; Exit(psTruncated); end;
+  Result := SizeRowsStride(L, Length(d) - L.dataOffset, F(12));
+  if Result <> psOk then L.format := rfNone;
+end;
+
+{ ---------- MTV ---------- }
+
+function ParseMtv(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var p: SizeInt; w, h: Int64;
+
+  function Number(out v: Int64): Boolean;
+  var k: Integer;
+  begin
+    v := 0; k := 0;
+    while (p < Length(d)) and (d[p] in [48..57]) and (k < 9) do begin
+      v := v * 10 + d[p] - 48; Inc(p); Inc(k);
+    end;
+    Result := (k > 0) and (v > 0);
+  end;
+
+begin
+  L.Clear;
+  p := 0;
+  if not Number(w) or (p >= Length(d)) or (d[p] <> 32) then Exit(psNotThis);
+  Inc(p);
+  if not Number(h) or (p >= Length(d)) or (d[p] <> 10) then Exit(psNotThis);
+  L.format := rfMTV;
+  L.width := w; L.height := h; L.channels := 3; L.bits := 8; L.maxval := 255;
+  L.dataOffset := p + 1;
+  Result := Finish(d, L);
+  { two numbers is a weak signature: the pixels have to fill the file }
+  if (Result = psOk) and (Length(d) - L.dataOffset - L.dataLength > 16) then Result := psNotThis;
+  if Result = psTruncated then Result := psNotThis;
+  if Result <> psOk then L.format := rfNone;
+end;
+
+{ ---------- VIFF ---------- }
+
+function ParseViff(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var be: Boolean; images, bands, storage, scheme, mapScheme, mapStorage, mapBytes, bpc: Int64;
+
+  function F(at: Integer): Int64;
+  begin Result := U32(d, at, be); end;
+
+begin
+  L.Clear;
+  if (Length(d) < 2) or (d[0] <> $AB) or (d[1] <> 1) then Exit(psNotThis);
+  if Length(d) < 1024 then Exit(psMalformed);
+  case d[4] of
+    2: be := True;           { IEEE: big-endian }
+    4, 8: be := False;       { DEC, NS: little-endian }
+  else Exit(psUnsupported);  { Cray }
+  end;
+  images := F(556); bands := F(560); storage := F(564); scheme := F(568);
+  mapScheme := F(572); mapStorage := F(576);
+  if (bands < 1) or (images < 1) then Exit(psMalformed);
+  if (scheme <> 0) or (images <> 1) or (bands > 4) then Exit(psUnsupported);
+  L.format := rfVIFF;
+  L.width := F(520); L.height := F(524); L.channels := bands; L.bigEndian := be;
+  case storage of
+    0: L.bits := 1;
+    1: L.bits := 8;
+    2: L.bits := 16;
+    5: begin L.bits := 32; L.isFloat := True; end;
+  else begin L.format := rfNone; Exit(psUnsupported); end;
+  end;
+  { planes of bits and of floats: one band only }
+  if (bands > 1) and not (L.bits in [8, 16]) then begin L.format := rfNone; Exit(psUnsupported); end;
+  if L.isFloat then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
+  { the colour map: map_row_size values for each of map_col_size entries }
+  mapBytes := 0;
+  if mapScheme <> 0 then begin
+    case mapStorage of
+      1: bpc := 1;
+      2: bpc := 2;
+      4, 5: bpc := 4;
+      9: bpc := 8;
+    else begin L.format := rfNone; Exit(psUnsupported); end;
+    end;
+    if (F(580) > 65536) or (F(584) > 65536) then begin L.format := rfNone; Exit(psUnsupported); end;
+    mapBytes := F(580) * F(584) * bpc;
+  end;
+  L.dataOffset := 1024 + mapBytes;
+  if L.dataOffset > Length(d) then begin L.format := rfNone; Exit(psTruncated); end;
+  if bands = 1 then Exit(Finish(d, L));
+  { the bands' planes: verbatim, interleaved for the codec (prarle) }
+  L.coding := CODING_PLANES;
+  Result := SizeRows(L, Length(d) - L.dataOffset);
+  if Result <> psOk then L.format := rfNone;
+end;
+
+{ ---------- VIPS ---------- }
+
+function ParseVips(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var be: Boolean; bands, fmt: Int64;
+begin
+  L.Clear;
+  if Length(d) < 4 then Exit(psNotThis);
+  if (d[0] = $08) and (d[1] = $F2) and (d[2] = $A6) and (d[3] = $B6) then be := True
+  else if (d[0] = $B6) and (d[1] = $A6) and (d[2] = $F2) and (d[3] = $08) then be := False
+  else Exit(psNotThis);
+  if Length(d) < 64 then Exit(psMalformed);
+  bands := U32(d, 12, be); fmt := U32(d, 20, be);
+  if bands < 1 then Exit(psMalformed);
+  if U32(d, 24, be) <> 0 then Exit(psUnsupported);   { coded: LabQ, RAD }
+  L.format := rfVIPS;
+  L.width := U32(d, 4, be); L.height := U32(d, 8, be);
+  if bands > MAX_CHANNELS then Exit(psUnsupported);
+  L.channels := bands;
+  L.bigEndian := be;
+  case fmt of
+    0, 1: L.bits := 8;        { unsigned and signed char }
+    2, 3: L.bits := 16;       { unsigned and signed short }
+    6: begin L.bits := 32; L.isFloat := True; end;
+  else begin L.format := rfNone; Exit(psUnsupported); end;   { 32-bit integers, double, complex }
+  end;
+  if L.isFloat then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
+  L.dataOffset := 64;
+  Result := Finish(d, L);
+end;
+
+{ ---------- DDS ---------- }
+
+function ParseDds(const d: TBytes; out L: TRasterLayout): TParseStatus;
+const
+  DDPF_FOURCC = $4;
+  DDSCAPS2_VOLUME = $200000;
+var h, depth, pfFlags, bitCount, m, k, bytes: Int64;
+begin
+  L.Clear;
+  if (Length(d) < 4) or (d[0] <> Ord('D')) or (d[1] <> Ord('D')) or (d[2] <> Ord('S')) or (d[3] <> 32) then
+    Exit(psNotThis);
+  if (Length(d) < 128) or (U32LE(d, 4) <> 124) then Exit(psMalformed);
+  h := U32LE(d, 12); depth := U32LE(d, 24);
+  pfFlags := U32LE(d, 80); bitCount := U32LE(d, 88);
+  L.format := rfDDS;
+  L.width := U32LE(d, 16); L.bigEndian := False;
+  if (pfFlags and DDPF_FOURCC) <> 0 then
+    { a Direct3D format number in place of four letters: the wide ones }
+    case U32LE(d, 84) of
+      36, 110, 113: begin L.channels := 4; L.bits := 16; end;
+      34, 112: begin L.channels := 2; L.bits := 16; end;
+      111: begin L.channels := 1; L.bits := 16; end;
+      114: begin L.channels := 1; L.bits := 32; L.isFloat := True; end;
+      115: begin L.channels := 2; L.bits := 32; L.isFloat := True; end;
+      116: begin L.channels := 4; L.bits := 32; L.isFloat := True; end;
+    else begin L.format := rfNone; Exit(psUnsupported); end;   { DXT, BC, DX10 }
+    end
+  else
+    case bitCount of
+      8: begin L.channels := 1; L.bits := 8; end;
+      16: begin
+        { two byte-wide masks (V8U8, A8L8): two channels; else one 16-bit value }
+        bytes := 0;
+        for k := 0 to 3 do begin
+          m := U32LE(d, 92 + 4 * k);
+          if (m = $FF) or (m = $FF00) then Inc(bytes) else if m <> 0 then bytes := -8;
+        end;
+        if bytes = 2 then begin L.channels := 2; L.bits := 8; end
+        else begin L.channels := 1; L.bits := 16; end;
+      end;
+      24: begin L.channels := 3; L.bits := 8; end;
+      32: begin L.channels := 4; L.bits := 8; end;
+    else begin L.format := rfNone; Exit(psUnsupported); end;
+    end;
+  { a volume: its slices one under the other }
+  if ((U32LE(d, 112) and DDSCAPS2_VOLUME) <> 0) and (depth > 1) then begin
+    if (h > 0) and (depth > MAX_DIMENSION div h) then begin L.format := rfNone; Exit(psMalformed); end;
+    h := h * depth;
+  end;
+  L.height := h;
+  if L.isFloat then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
+  L.dataOffset := 128;
+  Result := Finish(d, L);
 end;
 
 end.

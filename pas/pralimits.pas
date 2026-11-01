@@ -14,6 +14,9 @@ const
   MAX_CHANNELS = 256;
   { a text header (PNM, PAM, PFM): comments included }
   MAX_TEXT_HEADER = 1 shl 20;
+  { bytes a row may have beyond its samples, when the header gives its
+    length (XWD's bytes_per_line): the codec keeps them apart }
+  MAX_ROW_PAD = 1 shl 16;
 
   { the smallest codec stream: version, the header's length (and no
     header), the layout, the tail's length and the arithmetic coder's 4

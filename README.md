@@ -19,8 +19,8 @@ verified: `a` decompresses its own result and compares it with the input
 first, and `x` checks the size and the BLAKE3 hash the `.pra` carries.
 Today PRA takes binary PBM, PGM, PPM, PAM and PFM, BMP (uncompressed and
 bitfields, 1 to 32 bits), Radiance HDR, TGA, PCX, SGI, Sun Raster (each
-raw and run-length, given back byte for byte whoever wrote it), farbfeld
-and WBMP; see
+raw and run-length, given back byte for byte whoever wrote it), farbfeld,
+WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,
@@ -35,7 +35,7 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | raster layout, limits | `pas/praraster.pas`, `pas/pralimits.pas` | done |
 | Netpbm parser (P4-P7, PF/Pf) | `pas/prapnm.pas` | done |
 | BMP and Radiance HDR parsers | `pas/prabmp.pas`, `pas/prahdr.pas` | done |
-| farbfeld, TGA, Sun Raster, WBMP, PCX, SGI | `pas/praother.pas` | done |
+| farbfeld, TGA, Sun Raster, WBMP, PCX, SGI, XWD, MTV, VIFF, VIPS, DDS | `pas/praother.pas` | done |
 | run-length files, any writer | `pas/prarle.pas` | done (TGA, PCX, Sun Raster, SGI) |
 | more formats | | [the list](doc/FORMATS.md) |
 | model (counters, mixers, APM) | `pas/pramodel.pas` | first version |

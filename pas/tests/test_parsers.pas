@@ -1,5 +1,5 @@
-{ Layer 3: the BMP, Radiance HDR, farbfeld, TGA, Sun Raster and WBMP
-  parsers (prabmp, prahdr, praother).
+{ Layer 3: the BMP, Radiance HDR and other parsers (prabmp, prahdr,
+  praother).
   - the samples (tests/bmp, tests/hdr): the layout each reports, and for
     HDR the coder found for each line (Radiance's, stb's, flat);
   - hostile headers: each gives its status, never an exception, and a huge
@@ -265,7 +265,7 @@ begin
 
   Writeln('SGI');
   d := ReadAll(dirO + '/sgi_raw8.sgi'); st := ParseAny(d, L);
-  Check((st = psOk) and (L.format = rfSGI) and (L.coding = CODING_SGI_RAW) and (L.channels = 3)
+  Check((st = psOk) and (L.format = rfSGI) and (L.coding = CODING_PLANES) and (L.channels = 3)
     and (L.dataOffset = 512) and (L.dataLength = 25 * 14 * 3), 'sgi_raw8.sgi: verbatim, three planes');
   d := ReadAll(dirO + '/sgi_rle_ymajor.rgb'); st := ParseAny(d, L);
   Check((st = psOk) and (L.coding = CODING_SGI_RLE) and (L.channels = 4) and (L.dataOffset + L.dataLength = Length(d)),
@@ -287,6 +287,60 @@ begin
   rgbe := SgiFromPixels(SgiToPixels(dd, 7, 5, 3, 2), 7, 5, 3, 2);
   Check(CompareMem(@rgbe[0], @dd[0], Length(dd)), 'SGI planes to pixels and back');
 
+  Writeln('XWD, MTV, VIFF, VIPS, DDS');
+  d := ReadAll(dirO + '/xwd_rgb32_be.xwd'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfXWD) and (L.channels = 4) and (L.rowBytes = 116) and (L.dataOffset = 111)
+    and (L.dataLength = 116 * 19) and (XwdStride(d, 0, L.dataOffset) = 116),
+    'xwd_rgb32_be.xwd: big-endian header, rows of 108 bytes in 116');
+  d := ReadAll(dirO + '/xwd_mapped8_le.xwd'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfXWD) and (L.bits = 8) and (L.rowBytes = 32) and (L.dataOffset = 111 + 24 * 12),
+    'xwd_mapped8_le.xwd: little-endian header, 24 colours');
+  Check(ParseXwd(WithU32(d, 48, 30), L) = psMalformed, 'XWD, rows shorter than their pixels: malformed');
+  Check(ParseXwd(WithU32(d, 48, 1 shl 30), L) = psMalformed, 'XWD, rows of 1 GiB: malformed, nothing allocated');
+  Check(ParseXwd(WithU32(d, 20, 1 shl 24), L) = psTruncated, 'XWD, 16777216 rows in a few bytes: truncated');
+  Check(ParseXwd(WithU32(d, 8, 1), L) = psUnsupported, 'XWD, XYPixmap of 8 planes: unsupported');
+  Check(XwdStride(d, 0, 50) = -1, 'XWD stride from a header too short: none');
+  d := ReadAll(dirO + '/xwd_bitmap.xwd'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 1) and (L.rowBytes = 8) and (L.width = 50), 'xwd_bitmap.xwd: XYBitmap, 50 bits in 8 bytes');
+  d := ReadAll(dirO + '/mtv_rgb.mtv'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfMTV) and (L.dataOffset = 6) and (L.dataLength = Length(d) - 6), 'mtv_rgb.mtv: 26 x 18, R G B');
+  d := ReadAll(dirO + '/mtv_tail.mtv'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.dataOffset + L.dataLength = Length(d) - 1), 'mtv_tail.mtv: a byte after the pixels');
+  dd := Copy(d, 0, Length(d)); SetLength(dd, Length(d) + 100);
+  Check(ParseMtv(dd, L) = psNotThis, 'MTV with 100 bytes too many: not this');
+  Check(ParseMtv(Copy(d, 0, 100), L) = psNotThis, 'MTV cut short: not this');
+  Check(ParseMtv(Bytes('26x18'#10), L) = psNotThis, '"26x18": not this');
+  d := ReadAll(dirO + '/viff_rgb_be.viff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfVIFF) and (L.coding = CODING_PLANES) and (L.channels = 3) and L.bigEndian
+    and (L.dataOffset = 1024) and (L.dataLength = 23 * 15 * 3), 'viff_rgb_be.viff: three planes, big-endian');
+  d := ReadAll(dirO + '/viff_gray16_le.xv'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_RAW) and (L.bits = 16) and not L.bigEndian, 'viff_gray16_le.xv: one band, 16 bits, little-endian');
+  d := ReadAll(dirO + '/viff_mapped.xv'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.dataOffset = 1024 + 60), 'viff_mapped.xv: a map of 3 x 20 bytes');
+  Check(ParseViff(WithU32(d, 568, 1), L) = psUnsupported, 'VIFF, compressed: unsupported');
+  Check(ParseViff(WithU32(d, 556, 2), L) = psUnsupported, 'VIFF, two images: unsupported');
+  Check(ParseViff(WithU32(d, 584, 1 shl 20), L) = psUnsupported, 'VIFF, a map of a million colours: unsupported');
+  Check(ParseViff(Copy(d, 0, 1000), L) = psMalformed, 'VIFF cut inside its header: malformed');
+  d := ReadAll(dirO + '/vips_rgb_be.v'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfVIPS) and (L.channels = 3) and (L.dataOffset = 64)
+    and (L.dataOffset + L.dataLength < Length(d)), 'vips_rgb_be.v: pixels, then the XML');
+  d := ReadAll(dirO + '/vips_gray16_le.v'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 16) and not L.bigEndian, 'vips_gray16_le.v: 16 bits, little-endian');
+  Check(ParseVips(WithU32(d, 24, 2), L) = psUnsupported, 'VIPS, coded (LabQ): unsupported');
+  Check(ParseVips(WithU32(d, 20, 5), L) = psUnsupported, 'VIPS, 32-bit integers: unsupported');
+  d := ReadAll(dirO + '/dds_bgra32.dds'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfDDS) and (L.channels = 4) and (L.dataOffset = 128), 'dds_bgra32.dds: 32 bits, four channels');
+  d := ReadAll(dirO + '/dds_a8l8.dds'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.channels = 2) and (L.bits = 8), 'dds_a8l8.dds: two byte-wide masks, two channels');
+  d := ReadAll(dirO + '/dds_volume.dds'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.height = 24), 'dds_volume.dds: three slices of 8 rows, one under the other');
+  Check(ParseDds(WithU32(d, 24, $FFFFFF), L) = psMalformed, 'DDS, a volume of 16777215 slices: malformed');
+  d := ReadAll(dirO + '/dds_mips.dds'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.dataLength = 16 * 16 * 4) and (L.dataOffset + L.dataLength < Length(d)),
+    'dds_mips.dds: the main surface; the mipmaps in the tail');
+  Check(ParseDds(WithU32(WithU32(d, 80, 4), 84, $31545844), L) = psUnsupported, 'DDS, DXT1: unsupported');
+  Check(ParseDds(WithU32(d, 4, 100), L) = psMalformed, 'DDS, a header of 100 bytes: malformed');
+
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
   Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
@@ -295,7 +349,7 @@ begin
 
   Writeln('fuzzing');
   samples := nil;
-  for k := 0 to 7 do begin
+  for k := 0 to 11 do begin
     SetLength(samples, Length(samples) + 1);
     case k of
       0: samples[High(samples)] := ReadAll(dirB + '/palette8.bmp');
@@ -305,15 +359,20 @@ begin
       4: samples[High(samples)] := ReadAll(dirO + '/tga_mapped8.tga');
       5: samples[High(samples)] := ReadAll(dirO + '/pcx_ega.pcx');
       6: samples[High(samples)] := ReadAll(dirO + '/tga_rle_mapped.tga');
+      7: samples[High(samples)] := ReadAll(dirO + '/xwd_mapped8_le.xwd');
+      8: samples[High(samples)] := ReadAll(dirO + '/viff_rgb_be.viff');
+      9: samples[High(samples)] := ReadAll(dirO + '/vips_rgb_be.v');
+      10: samples[High(samples)] := ReadAll(dirO + '/dds_mips.dds');
     else samples[High(samples)] := ReadAll(dirO + '/sgi_rle_ymajor.rgb');
     end;
   end;
   bad := 0; oks := 0;
   for i := 1 to 20000 do begin
-    d := Copy(samples[i mod 8], 0, Length(samples[i mod 8]));
+    d := Copy(samples[i mod 12], 0, Length(samples[i mod 12]));
     if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
     for k := 1 to 1 + Integer(Rand mod 3) do
-      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 120)))] := Byte(Rand);
+      { VIFF's fields are past its 512-byte comment }
+      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), IfThen(i mod 12 = 8, 620, 120))))] := Byte(Rand);
     try
       st := ParseAny(d, L);
       if st = psOk then begin
@@ -324,8 +383,8 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, Format('20000 mutated headers of 6 formats: no exception, pixels inside (%d ok)', [oks]));
+  Check(bad = 0, Format('20000 mutated headers of 11 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 95) then Halt(1);
+  if (failures > 0) or (cells < 125) then Halt(1);
 end.

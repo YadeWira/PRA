@@ -362,6 +362,11 @@ begin
       rfWBMP: Result := '.wbmp';
       rfPCX: Result := '.pcx';
       rfSGI: Result := '.sgi';
+      rfXWD: Result := '.xwd';
+      rfMTV: Result := '.mtv';
+      rfVIFF: Result := '.viff';
+      rfVIPS: Result := '.v';
+      rfDDS: Result := '.dds';
     end;
 end;
 
