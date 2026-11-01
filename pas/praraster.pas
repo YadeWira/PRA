@@ -31,7 +31,7 @@ uses SysUtils;
 type
   { new formats go at the end: the stream keeps their number }
   TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR,
-    rfFarbfeld, rfTGA, rfSUN, rfWBMP);
+    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX);
 
   TParseStatus = (
     psOk,
@@ -46,6 +46,8 @@ const
   CODING_RAW = 0;
   CODING_HDR = 1;       { Radiance's scanlines (prahdr) }
   CODING_TGA_RLE = 2;   { TGA types 9, 10, 11 (prarle) }
+  CODING_SUN_RLE = 3;   { Sun Raster type 2 (prarle) }
+  CODING_PCX = 4;       { PCX (prarle, its planes: praother) }
 
 type
   TRasterLayout = record
@@ -96,6 +98,7 @@ begin
     rfTGA: Result := 'TGA';
     rfSUN: Result := 'Sun Raster';
     rfWBMP: Result := 'WBMP';
+    rfPCX: Result := 'PCX';
   else Result := 'none';
   end;
 end;

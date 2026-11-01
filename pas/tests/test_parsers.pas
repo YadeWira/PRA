@@ -81,7 +81,7 @@ end;
 
 var
   dirB, dirH, dirO: string; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
-  i, k, bad, oks: Integer; samples: array of TBytes; hdrText: string;
+  i, k, bad, oks, bpp, planes: Integer; samples: array of TBytes; hdrText: string; dd: TBytes;
 begin
   cells := 0; failures := 0; seed := 88172645;
   dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3);
@@ -210,7 +210,7 @@ begin
   d := ReadAll(dirO + '/ras_bgr24.ras');
   ExpectSun(Copy(d, 0, 20), psMalformed, 'Sun, cut inside the header');
   ExpectSun(Copy(d, 0, Length(d) - 1), psTruncated, 'Sun one byte short');
-  d[23] := 2; ExpectSun(d, psUnsupported, 'Sun, run-length (type 2)');
+  d[23] := 4; ExpectSun(d, psUnsupported, 'Sun, TIFF inside (type 4)');
   d[23] := 1; d[15] := 7; ExpectSun(d, psMalformed, 'Sun, depth 7');
   d := ReadAll(dirO + '/ff_rgba16.ff');
   Check(ParseFarbfeld(Copy(d, 0, Length(d) - 1), L) = psTruncated, 'farbfeld one byte short: truncated');
@@ -218,6 +218,50 @@ begin
   d := ReadAll(dirO + '/wbmp_shape.wbmp');
   Check(ParseWbmp(Copy(d, 0, Length(d) - 1), L) = psNotThis, 'WBMP one byte short: not a WBMP (its signature is weak)');
   Check(ParseWbmp(Bytes(#0#0#$FF#$FF#$FF#$FF#$7F#1), L) = psNotThis, 'WBMP, a width of 5 bytes');
+
+  Writeln('PCX and Sun run-length');
+  d := ReadAll(dirO + '/pcx_rgb24.pcx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfPCX) and (L.coding = CODING_PCX) and (L.channels = 3) and (L.width = 32)
+    and (L.dataOffset = 128) and (L.dataOffset + L.dataLength = Length(d)), 'pcx_rgb24.pcx: three 8-bit planes as channels');
+  d := ReadAll(dirO + '/pcx_pal8.pcx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 8) and (L.channels = 1) and (Length(d) - L.dataOffset - L.dataLength = 769),
+    'pcx_pal8.pcx: indices; the 769-byte palette is the tail');
+  d := ReadAll(dirO + '/pcx_ega.pcx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 4) and (L.width = 48), 'pcx_ega.pcx: four 1-bit planes as 4-bit indices');
+  d := ReadAll(dirO + '/pcx_mono.pcx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 1) and (L.width = 80), 'pcx_mono.pcx: one 1-bit plane');
+  d := ReadAll(dirO + '/pcx_rgb24.pcx');
+  Check(ParsePcx(Copy(d, 0, Length(d) - 1), L) = psTruncated, 'PCX one byte short: truncated');
+  Check(ParsePcx(Copy(d, 0, 100), L) = psMalformed, 'PCX cut inside its header: malformed');
+  d[2] := 0;
+  Check(ParsePcx(d, L) = psUnsupported, 'PCX not run-length coded: unsupported');
+  d := ReadAll(dirO + '/pcx_rgb24.pcx'); d[65] := 2;
+  Check(ParsePcx(d, L) = psUnsupported, 'PCX, two 8-bit planes: unsupported');
+  d := ReadAll(dirO + '/pcx_rgb24.pcx'); d[128] := $C0; d[129] := 7;
+  Check(ParsePcx(d, L) = psUnsupported, 'PCX, a run of 0: unsupported');
+  d := ReadAll(dirO + '/pcx_rgb24.pcx'); d[10] := 255; d[11] := 255;
+  Check(ParsePcx(d, L) = psTruncated, 'PCX, 65536 lines in a few bytes: nothing allocated');
+  { the planes <-> pixels, both ways, every layout }
+  bad := 0;
+  for k := 0 to 5 do begin
+    case k of
+      0: begin bpp := 8; planes := 3; end;
+      1: begin bpp := 8; planes := 4; end;
+      2: begin bpp := 1; planes := 2; end;
+      3: begin bpp := 1; planes := 3; end;
+      4: begin bpp := 1; planes := 4; end;
+    else begin bpp := 4; planes := 1; end;
+    end;
+    SetLength(dd, 5 * planes * 7);
+    for i := 0 to High(dd) do dd[i] := Byte(Rand);
+    rgbe := PcxFromPixels(PcxToPixels(dd, bpp, planes, 7, 5), bpp, planes, 7, 5);
+    if (Length(rgbe) <> Length(dd)) or not CompareMem(@rgbe[0], @dd[0], Length(dd)) then Inc(bad);
+  end;
+  Check(bad = 0, 'PCX planes to pixels and back, in all 6 layouts');
+  d := ReadAll(dirO + '/ras_rle24.ras'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_SUN_RLE) and (L.rowBytes = 82) and (L.dataOffset + L.dataLength = Length(d)),
+    'ras_rle24.ras: run-length, rows of 81 bytes padded to 82');
+  Check(ParseSun(Copy(d, 0, Length(d) - 1), L) = psTruncated, 'Sun run-length one byte short: truncated');
 
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
@@ -235,7 +279,7 @@ begin
       2: samples[High(samples)] := ReadAll(dirH + '/radiance.hdr');
       3: samples[High(samples)] := ReadAll(dirH + '/stb.hdr');
       4: samples[High(samples)] := ReadAll(dirO + '/tga_mapped8.tga');
-      5: samples[High(samples)] := ReadAll(dirO + '/ras_mapped8.ras');
+      5: samples[High(samples)] := ReadAll(dirO + '/pcx_ega.pcx');
       6: samples[High(samples)] := ReadAll(dirO + '/tga_rle_mapped.tga');
     else samples[High(samples)] := ReadAll(dirO + '/wbmp_shape.wbmp');
     end;
@@ -259,5 +303,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 6 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 70) then Halt(1);
+  if (failures > 0) or (cells < 85) then Halt(1);
 end.

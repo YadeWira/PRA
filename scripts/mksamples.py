@@ -237,3 +237,61 @@ tga_rle_file('tga_rle32_cross.tga', 10, 32, lambda x, y: bytes([flat(x, y, 2), f
 tga_rle_file('tga_rle8_random.tga', 11, 8, lambda x, y: bytes([flat(x, y, 0) // 8 * 8]), False, True)
 tga_rle_file('tga_rle_mapped.tga', 9, 8, lambda x, y: bytes([(x // 6 + y // 4) % 12]), True, True,
              cmap=bytes(i * 9 % 256 for i in range(36)), cmbits=24)
+
+# PCX: lines of planes, each run-length coded the usual way (runs of 2 and
+# more, a byte of $C0 and up as a run of 1, lines apart), and one at random
+def pcx_rle(data, linelen, randomly=False):
+    out = bytearray()
+    for s0 in range(0, len(data), linelen):
+        line = data[s0:s0 + linelen]; i = 0
+        while i < len(line):
+            r = 1
+            while i + r < len(line) and r < 63 and line[i + r] == line[i]: r += 1
+            if randomly: r = 1 + rand() % r
+            if r >= 2 or line[i] >= 0xC0 or (randomly and rand() % 3 == 0):
+                out += bytes([0xC0 | r, line[i]])
+            else:
+                out.append(line[i])
+            i += r
+    return bytes(out)
+
+def pcx(name, bpp, planes, bpl, lines, plane_byte, palette=b'', randomly=False, w=None):
+    w = w or bpl * 8 // bpp
+    head = struct.pack('<BBBBHHHHHH', 10, 5, 1, bpp, 0, 0, w - 1, lines - 1, 72, 72)
+    head += bytes(48) + b'\x00' + bytes([planes]) + struct.pack('<HH', bpl, 1) + bytes(58)
+    data = b''.join(bytes(plane_byte(x, y, c) for x in range(bpl)) for y in range(lines) for c in range(planes))
+    write(name, head + pcx_rle(data, planes * bpl, randomly) + palette)
+
+pcx('pcx_rgb24.pcx', 8, 3, 32, 20, lambda x, y, c: flat(x, y, c))
+pcx('pcx_pal8.pcx', 8, 1, 40, 25, lambda x, y, c: (x // 5 + y // 4) * 7 % 256, b'\x0c' + bytes(i % 256 for i in range(768)))
+pcx('pcx_ega.pcx', 1, 4, 6, 24, lambda x, y, c: (0xF0 if (x + y + c) % 3 else 0x0F) if y % 4 else 0xFF)
+pcx('pcx_3plane.pcx', 1, 3, 4, 16, lambda x, y, c: [0xAA, 0x55, 0xC3][c] if (y + x) % 2 else 0)
+pcx('pcx_mono.pcx', 1, 1, 10, 30, lambda x, y, c: 0xFF if (x * y) % 5 else 0xC3, randomly=True)
+pcx('pcx_4bit.pcx', 4, 1, 16, 12, lambda x, y, c: ((x // 2) % 16) << 4 | (y % 16))
+
+# Sun Raster type 2: $80 n v for runs (here of 3 and more), $80 0 for a
+# literal $80, and one at random
+def sun_rle(data, randomly=False):
+    out = bytearray(); i = 0
+    while i < len(data):
+        r = 1
+        while i + r < len(data) and r < 256 and data[i + r] == data[i]: r += 1
+        if randomly: r = 1 + rand() % r
+        if r >= 3 or (randomly and r >= 2):
+            out += bytes([0x80, r - 1, data[i]])
+        else:
+            r = 1
+            out += b'\x80\x00' if data[i] == 0x80 else bytes([data[i]])
+        i += r
+    return bytes(out)
+
+def sun2(name, depth, rowfn, w=27, h=15, randomly=False, cmap=b''):
+    rowbytes = ((w * depth + 15) // 16) * 2
+    rows = b''.join(r + bytes(rowbytes - len(r)) for r in (rowfn(y) for y in range(h)))
+    coded = sun_rle(rows, randomly)
+    head = struct.pack('>8I', 0x59A66A95, w, h, depth, len(coded), 2, 1 if cmap else 0, len(cmap))
+    write(name, head + cmap + coded)
+
+sun2('ras_rle24.ras', 24, lambda y: b''.join(bytes([flat(x, y, 2), 0x80 if x == 3 else flat(x, y, 1), flat(x, y, 0)]) for x in range(27)))
+sun2('ras_rle8_random.ras', 8, lambda y: bytes(128 if x % 9 == 0 else (x // 4) * 20 % 256 for x in range(27)), randomly=True,
+     cmap=bytes(i * 3 % 256 for i in range(36)))

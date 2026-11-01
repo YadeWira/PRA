@@ -13,8 +13,13 @@
     extension area and footer) is the tail.
   - Sun Raster: magic 59A66A95, a 32-byte header and a colour map; rows
     padded to 16 bits; depth 1, 8, 24 (B, G, R; R, G, B for type 3) or 32
-    (a pad byte, then the three). The run-length type (2) is psUnsupported
-    here.
+    (a pad byte, then the three). Type 2 run-length codes those bytes
+    (prarle).
+  - PCX (ZSoft): a 128-byte header (manufacturer 10, encoding 1), then the
+    lines run-length coded (prarle), each line the planes one after the
+    other; what follows (the 256-colour palette, $0C and 768 bytes) is the
+    tail. 1, 2, 4 or 8 bits in one plane; 8 bits in 3 or 4 planes (RGB,
+    RGBA); 1 bit in 2 to 4 planes (EGA's 16 colours).
   - WBMP type 0: two zero bytes, width and height as multi-byte integers
     (7 bits a byte, the high bit set on all but the last), then 1-bit rows
     padded to a byte. }
@@ -32,10 +37,25 @@ function ParseFarbfeld(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseTga(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseSun(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseWbmp(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParsePcx(const d: TBytes; out L: TRasterLayout): TParseStatus;
+
+{ PCX: what its 128-byte header (at hdr[first..]) says of the planes: bits a
+  pixel in a plane, planes, bytes a plane's line, lines. False if it is not
+  one PRA takes. }
+function PcxParams(const hdr: TBytes; first: SizeInt; out bpp, planes, bpl, lines: Integer): Boolean;
+{ A PCX's decoded lines (each: the planes one after the other) <-> the
+  pixels the codec models: 8-bit planes interleaved into channels, 1-bit
+  planes merged into 4-bit indices, one plane as it is. }
+function PcxToPixels(const dec: TBytes; bpp, planes, bpl, lines: Integer): TBytes;
+{ the pixels' layout: width, channels, bits }
+procedure PcxPixels(bpp, planes, bpl: Integer; out w, channels, bits: Integer);
+function PcxFromPixels(const px: TBytes; bpp, planes, bpl, lines: Integer): TBytes;
 
 implementation
 
 uses pralimits, prarle;
+
+function U16LE(const d: TBytes; i: SizeInt): Int64; forward;
 
 function U16LE(const d: TBytes; i: SizeInt): Int64;
 begin Result := d[i] or (d[i + 1] shl 8); end;
@@ -114,7 +134,7 @@ end;
 { ---------- Sun Raster ---------- }
 
 function ParseSun(const d: TBytes; out L: TRasterLayout): TParseStatus;
-var w, h, depth, rtype, maptype, maplen: Int64;
+var w, h, depth, rtype, maptype, maplen, used: Int64;
 begin
   L.Clear;
   if (Length(d) < 4) or (U32BE(d, 0) <> $59A66A95) then Exit(psNotThis);
@@ -123,11 +143,7 @@ begin
   rtype := U32BE(d, 20); maptype := U32BE(d, 24); maplen := U32BE(d, 28);
   if maptype > 2 then Exit(psMalformed);
   if maplen > MAX_TEXT_HEADER then Exit(psUnsupported);
-  case rtype of
-    0, 1, 3: ;
-    2: Exit(psUnsupported);        { run-length coded }
-  else Exit(psUnsupported);        { TIFF, IFF, experimental }
-  end;
+  if not (rtype in [0, 1, 2, 3]) then Exit(psUnsupported);    { TIFF, IFF, experimental }
   L.format := rfSUN;
   L.width := w; L.height := h; L.bigEndian := True;
   case depth of
@@ -140,6 +156,15 @@ begin
   L.maxval := (Int64(1) shl L.bits) - 1;
   L.dataOffset := 32 + maplen;
   if L.dataOffset > Length(d) then begin L.format := rfNone; Exit(psTruncated); end;
+  if rtype = 2 then begin
+    { run-length coded (prarle): the rows' bytes, padded, decoded }
+    L.coding := CODING_SUN_RLE;
+    Result := SizeRows(L, High(Int64) shr 2);
+    if Result = psOk then Result := ByteRleLength(brSun, d, L.dataOffset, L.rowBytes * L.height, used);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+    L.dataLength := used;
+    Exit(psOk);
+  end;
   Result := Finish(d, L);
 end;
 
@@ -177,6 +202,101 @@ begin
     L.format := rfNone; Result := psNotThis;
   end;
   if Result = psTruncated then begin L.format := rfNone; Result := psNotThis; end;
+end;
+
+{ ---------- PCX ---------- }
+
+function PcxParams(const hdr: TBytes; first: SizeInt; out bpp, planes, bpl, lines: Integer): Boolean;
+var y0, y1: Int64;
+begin
+  bpp := 0; planes := 0; bpl := 0; lines := 0;
+  if (first < 0) or (first + 128 > Length(hdr)) or (hdr[first] <> 10) or (hdr[first + 2] <> 1) then Exit(False);
+  bpp := hdr[first + 3]; planes := hdr[first + 65]; bpl := U16LE(hdr, first + 66);
+  y0 := U16LE(hdr, first + 6); y1 := U16LE(hdr, first + 10);
+  lines := y1 - y0 + 1;
+  if (lines < 1) or (bpl < 1) then Exit(False);
+  case bpp of
+    1: Result := planes in [1, 2, 3, 4];
+    2, 4: Result := planes = 1;
+    8: Result := planes in [1, 3, 4];
+  else Result := False;
+  end;
+end;
+
+{ the pixels' layout: width, channels, bits }
+procedure PcxPixels(bpp, planes, bpl: Integer; out w, channels, bits: Integer);
+begin
+  if planes = 1 then begin w := bpl * 8 div bpp; channels := 1; bits := bpp; end
+  else if bpp = 8 then begin w := bpl; channels := planes; bits := 8; end
+  else begin w := bpl * 8; channels := 1; bits := 4; end;
+end;
+
+function PcxToPixels(const dec: TBytes; bpp, planes, bpl, lines: Integer): TBytes;
+var y, x, c, line, v: Integer; o: Int64;
+begin
+  if planes = 1 then Exit(Copy(dec, 0, Length(dec)));
+  { 8-bit planes: as many bytes; 1-bit planes: 4 bits a pixel, whatever the
+    planes (2 to 4) }
+  Result := nil;
+  if bpp = 8 then SetLength(Result, Length(dec)) else SetLength(Result, Int64(lines) * bpl * 4);
+  line := planes * bpl;
+  for y := 0 to lines - 1 do begin
+    o := Int64(y) * line;
+    if bpp = 8 then
+      for x := 0 to bpl - 1 do
+        for c := 0 to planes - 1 do Result[o + x * planes + c] := dec[o + c * bpl + x]
+    else
+      { 1-bit planes: pixel x's index has plane c's bit as its bit c; two
+        4-bit pixels a byte, the first in the high half }
+      for x := 0 to bpl * 8 - 1 do begin
+        v := 0;
+        for c := 0 to planes - 1 do v := v or (((dec[o + c * bpl + x shr 3] shr (7 - x and 7)) and 1) shl c);
+        if (x and 1) = 0 then Result[Int64(y) * bpl * 4 + x shr 1] := v shl 4
+        else Result[Int64(y) * bpl * 4 + x shr 1] := Result[Int64(y) * bpl * 4 + x shr 1] or v;
+      end;
+  end;
+end;
+
+function PcxFromPixels(const px: TBytes; bpp, planes, bpl, lines: Integer): TBytes;
+var y, x, c, line, v: Integer; o: Int64;
+begin
+  if planes = 1 then Exit(Copy(px, 0, Length(px)));
+  line := planes * bpl;
+  Result := nil; SetLength(Result, Int64(lines) * line);
+  for y := 0 to lines - 1 do begin
+    o := Int64(y) * line;
+    if bpp = 8 then
+      for x := 0 to bpl - 1 do
+        for c := 0 to planes - 1 do Result[o + c * bpl + x] := px[o + x * planes + c]
+    else
+      for x := 0 to bpl * 8 - 1 do begin
+        v := px[Int64(y) * bpl * 4 + x shr 1];
+        if (x and 1) = 0 then v := v shr 4 else v := v and 15;
+        for c := 0 to planes - 1 do
+          if ((v shr c) and 1) <> 0 then
+            Result[o + c * bpl + x shr 3] := Result[o + c * bpl + x shr 3] or (1 shl (7 - x and 7));
+      end;
+  end;
+end;
+
+function ParsePcx(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var bpp, planes, bpl, lines, w, ch, bits: Integer; used: Int64;
+begin
+  L.Clear;
+  if (Length(d) < 3) or (d[0] <> 10) or not (d[1] in [0, 2, 3, 4, 5]) then Exit(psNotThis);
+  if d[2] <> 1 then Exit(psUnsupported);          { not run-length coded }
+  if Length(d) < 128 then Exit(psMalformed);
+  if not PcxParams(d, 0, bpp, planes, bpl, lines) then Exit(psUnsupported);
+  PcxPixels(bpp, planes, bpl, w, ch, bits);
+  L.format := rfPCX; L.coding := CODING_PCX;
+  L.width := w; L.height := lines; L.channels := ch; L.bits := bits;
+  L.maxval := (Int64(1) shl bits) - 1;
+  L.dataOffset := 128;
+  Result := SizeRows(L, High(Int64) shr 2);
+  if Result = psOk then
+    Result := ByteRleLength(brPcx, d, 128, Int64(lines) * planes * bpl, used);
+  if Result <> psOk then begin L.format := rfNone; Exit; end;
+  L.dataLength := used;
 end;
 
 end.

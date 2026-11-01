@@ -50,6 +50,30 @@ function TgaRleRebuild(const raw, side: TBytes; const L: TRasterLayout; ps: Inte
   allocated. }
 function TgaRleFits(w, h, ps, available: Int64): Boolean;
 
+
+type
+  { The byte-escape run-length codings: a run is marked by a byte, anything
+    else is a literal.
+    - PCX: a byte with its two top bits set is a run of (b and 63) copies
+      (0 to 63) of the next byte; any other byte is itself. A literal of
+      $C0 or more cannot be written: it is a run of 1.
+    - Sun Raster type 2: $80 n v is n + 1 copies of v (n >= 1), $80 0 is a
+      literal $80, any other byte is itself. }
+  TByteRle = (brPcx, brSun);
+
+{ The decoded bytes (count of them, rows of lineLen bytes, which runs may
+  cross or not) at d[first..]: the bytes, the runs' choices coded (side),
+  and how many coded bytes they took. }
+function ByteRleScan(g: TByteRle; const d: TBytes; first: SizeInt; count, lineLen: Int64;
+                     out raw, side: TBytes; out used: Int64): TParseStatus;
+{ only the coded length (the parser) }
+function ByteRleLength(g: TByteRle; const d: TBytes; first: SizeInt; count: Int64; out used: Int64): TParseStatus;
+{ the coded bytes again, from the decoded ones and side }
+function ByteRleRebuild(g: TByteRle; const raw, side: TBytes; lineLen, usedLimit: Int64; out coded: TBytes): Boolean;
+{ whether count decoded bytes can be in `available` coded ones: a run holds
+  at most 63 (PCX) or 256 (Sun) in 2 or 3 bytes }
+function ByteRleFits(g: TByteRle; count, available: Int64): Boolean;
+
 implementation
 
 uses praarith, pramodel;
@@ -252,6 +276,161 @@ begin
       Inc(o, 1 + count * ps);
     end;
     Inc(n, count);
+  end;
+  Result := o = usedLimit;
+end;
+
+{ ---------- byte-escape codings: PCX, Sun Raster ---------- }
+
+function MaxRun(g: TByteRle): Integer; inline;
+begin
+  if g = brPcx then Result := 63 else Result := 256;
+end;
+
+function ByteRleFits(g: TByteRle; count, available: Int64): Boolean;
+begin
+  if (count < 0) or (count > MAX_RAW) or (available < 0) then Exit(False);
+  if g = brPcx then Result := (count + 62) div 63 * 2 <= available
+  else Result := (count + 255) div 256 * 3 <= available;
+end;
+
+{ one coded token at d[p]: its count of decoded bytes, whether it is a run,
+  its value, and its coded size; False if the data ends inside it }
+function ReadToken(g: TByteRle; const d: TBytes; p: SizeInt; out count, isRun: Integer; out v: Byte;
+                   out size: Integer): Boolean;
+var b: Byte;
+begin
+  Result := False;
+  if p >= Length(d) then Exit;
+  b := d[p];
+  if g = brPcx then begin
+    if b >= $C0 then begin
+      if p + 1 >= Length(d) then Exit;
+      count := b and 63; isRun := 1; v := d[p + 1]; size := 2;
+    end else begin count := 1; isRun := 0; v := b; size := 1; end;
+  end else begin
+    if b = $80 then begin
+      if p + 1 >= Length(d) then Exit;
+      if d[p + 1] = 0 then begin count := 1; isRun := 0; v := $80; size := 2; end
+      else begin
+        if p + 2 >= Length(d) then Exit;
+        count := d[p + 1] + 1; isRun := 1; v := d[p + 2]; size := 3;
+      end;
+    end else begin count := 1; isRun := 0; v := b; size := 1; end;
+  end;
+  Result := True;
+end;
+
+function ByteRleLength(g: TByteRle; const d: TBytes; first: SizeInt; count: Int64; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; c, r, size: Integer; v: Byte;
+begin
+  used := 0;
+  if not ByteRleFits(g, count, Length(d) - first) then Exit(psTruncated);
+  p := first; n := 0;
+  while n < count do begin
+    if not ReadToken(g, d, p, c, r, v, size) then Exit(psTruncated);
+    if n + c > count then Exit(psMalformed);
+    { a PCX run of 0 decodes to nothing: its value could not come back }
+    if c = 0 then Exit(psUnsupported);
+    Inc(p, size); Inc(n, c);
+  end;
+  used := p - first;
+  Result := psOk;
+end;
+
+{ how many equal bytes from n, at most cap }
+function ByteRunAt(const raw: TBytes; n, total, cap: Int64): Integer;
+begin
+  Result := 1;
+  while (Result < cap) and (n + Result < total) and (raw[n + Result] = raw[n]) do Inc(Result);
+end;
+
+{ one token's choice, both ways. Contexts: the run at n, crossing rows and
+  not; whether the value forces a run (PCX, $C0 and up); the previous kind. }
+procedure CodeByteToken(g: TByteRle; var pc: TPacketCoder; const raw: TBytes; n, total, lineLen: Int64;
+                        var prevRun: Integer; var isRun, count: Integer);
+var er, erLine, lineRem, ctx, forced, cap: Integer;
+begin
+  cap := MaxRun(g);
+  lineRem := lineLen - n mod lineLen;
+  er := ByteRunAt(raw, n, total, cap);
+  if er > lineRem then erLine := lineRem else erLine := er;
+  forced := Ord((g = brPcx) and (raw[n] >= $C0));
+  if forced = 0 then begin
+    ctx := Bucket(er) + 4 * Bucket(erLine) + 16 * prevRun + 32 * Ord(lineRem = 1) + 64 * Ord(g);
+    isRun := pc.Bit(ctx, isRun);
+  end else isRun := 1;
+  if isRun = 0 then count := 1
+  else begin
+    ctx := 256 + 16 * forced + 4 * Ord(er = erLine) + Bucket(er) + 64 * Ord(g);
+    if pc.Bit(ctx, Ord(count = er)) <> 0 then count := er
+    else if (erLine <> er) and (pc.Bit(ctx + 32, Ord(count = erLine)) <> 0) then count := erLine
+    else if g = brPcx then count := pc.Tree(1024, count, 6)
+    else count := pc.Tree(2048, count - 1, 8) + 1;
+  end;
+  prevRun := isRun;
+end;
+
+function ByteRleScan(g: TByteRle; const d: TBytes; first: SizeInt; count, lineLen: Int64;
+                     out raw, side: TBytes; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; c, r, size, k, prevRun, isRun, cnt: Integer; v: Byte; pc: TPacketCoder;
+begin
+  raw := nil; side := nil;
+  Result := ByteRleLength(g, d, first, count, used);
+  if Result <> psOk then Exit;
+  if lineLen < 1 then Exit(psMalformed);
+  SetLength(raw, count);
+  p := first; n := 0;
+  while n < count do begin
+    ReadToken(g, d, p, c, r, v, size);
+    for k := 0 to c - 1 do raw[n + k] := v;
+    Inc(p, size); Inc(n, c);
+  end;
+  pc.Init(True, nil);
+  p := first; n := 0; prevRun := 0;
+  while n < count do begin
+    ReadToken(g, d, p, c, r, v, size);
+    isRun := r; cnt := c;
+    CodeByteToken(g, pc, raw, n, count, lineLen, prevRun, isRun, cnt);
+    Inc(p, size); Inc(n, c);
+  end;
+  side := pc.enc.Finish;
+end;
+
+function ByteRleRebuild(g: TByteRle; const raw, side: TBytes; lineLen, usedLimit: Int64; out coded: TBytes): Boolean;
+var pc: TPacketCoder; n, total: Int64; o: SizeInt; prevRun, isRun, cnt: Integer; v: Byte;
+begin
+  coded := nil; Result := False;
+  total := Length(raw);
+  if (lineLen < 1) or (usedLimit < 0) then Exit;
+  SetLength(coded, usedLimit);
+  pc.Init(False, side);
+  n := 0; o := 0; prevRun := 0;
+  while n < total do begin
+    isRun := 0; cnt := 1;
+    CodeByteToken(g, pc, raw, n, total, lineLen, prevRun, isRun, cnt);
+    if (cnt < 0) or (n + cnt > total) then Exit;
+    v := raw[n];
+    if isRun = 0 then begin
+      if g = brPcx then begin
+        if v >= $C0 then Exit;                     { only a damaged side }
+        if o + 1 > usedLimit then Exit;
+        coded[o] := v; Inc(o);
+      end else if v = $80 then begin
+        if o + 2 > usedLimit then Exit;
+        coded[o] := $80; coded[o + 1] := 0; Inc(o, 2);
+      end else begin
+        if o + 1 > usedLimit then Exit;
+        coded[o] := v; Inc(o);
+      end;
+    end else if g = brPcx then begin
+      if (cnt < 1) or (cnt > 63) or (o + 2 > usedLimit) then Exit;
+      coded[o] := $C0 or cnt; coded[o + 1] := v; Inc(o, 2);
+    end else begin
+      if (cnt < 2) or (cnt > 256) or (o + 3 > usedLimit) then Exit;
+      coded[o] := $80; coded[o + 1] := cnt - 1; coded[o + 2] := v; Inc(o, 3);
+    end;
+    Inc(n, cnt);
   end;
   Result := o = usedLimit;
 end;

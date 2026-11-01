@@ -685,6 +685,7 @@ begin
   if Result = psNotThis then Result := ParseHdr(d, L);
   if Result = psNotThis then Result := ParseFarbfeld(d, L);
   if Result = psNotThis then Result := ParseSun(d, L);
+  if Result = psNotThis then Result := ParsePcx(d, L);
   { no magic of their own: last, WBMP (which has to fill the file) first }
   if Result = psNotThis then Result := ParseWbmp(d, L);
   if Result = psNotThis then Result := ParseTga(d, L);
@@ -716,8 +717,76 @@ begin
   Result := L;
   Result.coding := CODING_RAW;
   Result.dataOffset := 0;
-  Result.rowBytes := L.width * PixelBytes(L);
+  Result.rowBytes := (L.width * L.channels * L.bits + 7) div 8;
+  if L.format = rfSUN then Result.rowBytes := (Result.rowBytes + 1) and not 1;
   Result.dataLength := Result.rowBytes * L.height;
+end;
+
+{ ---------- run-length codings with their choices coded (prarle) ---------- }
+
+function SideCoded(const L: TRasterLayout): Boolean;
+begin
+  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX];
+end;
+
+{ the raw pixels and the coded choices of the coded pixels in d }
+function CodedScan(const d: TBytes; const L: TRasterLayout; out raw, side: TBytes): Boolean;
+var used: Int64; dec: TBytes; bpp, planes, bpl, lines: Integer; R: TRasterLayout;
+begin
+  raw := nil; side := nil; Result := False;
+  R := RawLayout(L);
+  case L.coding of
+    CODING_TGA_RLE: Result := TgaRleScan(d, L, PixelBytes(L), raw, side, used) = psOk;
+    CODING_SUN_RLE: Result := ByteRleScan(brSun, d, L.dataOffset, R.dataLength, R.rowBytes, raw, side, used) = psOk;
+    CODING_PCX: begin
+      if not PcxParams(d, 0, bpp, planes, bpl, lines) then Exit;
+      Result := ByteRleScan(brPcx, d, L.dataOffset, Int64(lines) * planes * bpl, planes * bpl, dec, side, used) = psOk;
+      if Result then raw := PcxToPixels(dec, bpp, planes, bpl, lines);
+    end;
+  end;
+  Result := Result and (used = L.dataLength);
+end;
+
+{ the coded pixels again (hdr: the file's header, which PCX needs) }
+function CodedRebuild(const hdr: TBytes; hdrFirst: SizeInt; const raw, side: TBytes; const L: TRasterLayout;
+                      out coded: TBytes): Boolean;
+var bpp, planes, bpl, lines: Integer; R: TRasterLayout;
+begin
+  coded := nil; Result := False;
+  R := RawLayout(L);
+  if Length(raw) <> R.dataLength then Exit;
+  case L.coding of
+    CODING_TGA_RLE: Result := TgaRleRebuild(raw, side, L, PixelBytes(L), L.dataLength, coded);
+    CODING_SUN_RLE: Result := ByteRleRebuild(brSun, raw, side, R.rowBytes, L.dataLength, coded);
+    CODING_PCX: begin
+      if not PcxParams(hdr, hdrFirst, bpp, planes, bpl, lines) then Exit;
+      Result := ByteRleRebuild(brPcx, PcxFromPixels(raw, bpp, planes, bpl, lines), side, planes * bpl,
+                               L.dataLength, coded);
+    end;
+  end;
+end;
+
+{ the decoder, before anything is allocated: can the raw pixels be in
+  dataLength coded bytes at all; and do they agree with the header }
+function CodedFits(const hdr: TBytes; hdrFirst: SizeInt; const L: TRasterLayout): Boolean;
+var bpp, planes, bpl, lines, w, ch, bits: Integer; R: TRasterLayout;
+begin
+  R := RawLayout(L);
+  case L.coding of
+    CODING_TGA_RLE: Result := TgaRleFits(L.width, L.height, PixelBytes(L), L.dataLength);
+    CODING_SUN_RLE: Result := ByteRleFits(brSun, R.dataLength, L.dataLength);
+    CODING_PCX: begin
+      { the pixels' layout has to be the one the header gives (PcxFromPixels
+        reads them by it), and the decoded lines have to fit }
+      Result := PcxParams(hdr, hdrFirst, bpp, planes, bpl, lines) and (lines = L.height);
+      if Result then begin
+        PcxPixels(bpp, planes, bpl, w, ch, bits);
+        Result := (w = L.width) and (ch = L.channels) and (bits = L.bits)
+          and ByteRleFits(brPcx, Int64(lines) * planes * bpl, L.dataLength);
+      end;
+    end;
+  else Result := False;
+  end;
 end;
 
 { What the stream says before its pixels: ReadStream reads it (the decoder,
@@ -760,21 +829,27 @@ begin
   flags := src.Get;
   h.L.maxval := src.GetVarint(High(Cardinal));
   if not src.ok or (flags > 15) then Exit(dsBadStream);
-  if h.L.format = rfHDR then h.L.coding := CODING_HDR
-  else if (flags and 8) <> 0 then begin
-    if h.L.format <> rfTGA then Exit(dsBadStream);
-    h.L.coding := CODING_TGA_RLE;
+  { how the file stores its pixels: by the format, and flag bit 3 (TGA and
+    Sun Raster run-length) }
+  case h.L.format of
+    rfHDR: h.L.coding := CODING_HDR;
+    rfPCX: h.L.coding := CODING_PCX;
+    rfTGA: if (flags and 8) <> 0 then h.L.coding := CODING_TGA_RLE;
+    rfSUN: if (flags and 8) <> 0 then h.L.coding := CODING_SUN_RLE;
   end;
-  if h.L.coding = CODING_TGA_RLE then begin
-    { the packets' length within the cap, the image within what that length
-      can hold, and the packets' choices }
+  if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE]) then Exit(dsBadStream);
+  if SideCoded(h.L) then begin
+    { the coded length within the cap, the image within what that length
+      can hold, and the coder's choices }
     h.L.dataLength := src.GetVarint(maxOut);
     sideLen := src.GetVarint(Length(s));
     if not src.ok or (sideLen > Length(s) - src.p) then Exit(dsBadStream);
-    if not TgaRleFits(h.L.width, h.L.height, PixelBytes(h.L), h.L.dataLength) then Exit(dsBadStream);
+    if (h.L.width < 1) or (h.L.height < 1) or (h.L.width > MAX_DIMENSION) or (h.L.height > MAX_DIMENSION)
+       or (h.L.channels < 1) or (h.L.channels > 4) or not (h.L.bits in [1, 2, 4, 8, 16]) then Exit(dsBadStream);
+    if not CodedFits(s, h.hdrFirst, h.L) then Exit(dsBadStream);
     h.side := Copy(s, src.p, sideLen);
     Inc(src.p, sideLen);
-    h.L.rowBytes := h.L.width * PixelBytes(h.L);
+    h.L.rowBytes := RawLayout(h.L).rowBytes;
   end;
   if h.L.coding = CODING_HDR then begin
     { the scanlines' length within the cap, and the image within what that
@@ -1046,13 +1121,13 @@ begin
   if L.bigEndian then flags := flags or 1;
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
-  if L.coding = CODING_TGA_RLE then flags := flags or 8;
+  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE] then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
   rgbe := nil; modes := nil; side := nil;
-  if L.coding = CODING_TGA_RLE then begin
-    { the packets' length and their choices; the pixels go to the pixel coder }
-    if TgaRleScan(d, L, PixelBytes(L), rgbe, side, used) <> psOk then begin why := 'TGA packets'; Exit(False); end;
+  if SideCoded(L) then begin
+    { the coded length and the coder's choices; the pixels go to the pixel coder }
+    if not CodedScan(d, L, rgbe, side) then begin why := 'run-length coding'; Exit(False); end;
     o.PutVarint(L.dataLength);
     o.PutVarint(Length(side));
     o.PutBytes(side, 0, Length(side));
@@ -1109,8 +1184,8 @@ begin
     if L.coding = CODING_HDR then begin
       lines := HdrEncode(back, modes, L);
       ok := (Length(lines) = L.dataLength) and SameBytes(lines, 0, d, L.dataOffset, L.dataLength);
-    end else if L.coding = CODING_TGA_RLE then begin
-      ok := TgaRleRebuild(back, side, L, PixelBytes(L), L.dataLength, lines)
+    end else if SideCoded(L) then begin
+      ok := CodedRebuild(d, 0, back, side, L, lines)
         and SameBytes(lines, 0, d, L.dataOffset, L.dataLength);
     end else
       ok := SameBytes(back, L.dataOffset, d, L.dataOffset, L.dataLength);
@@ -1169,9 +1244,9 @@ begin
     lines := HdrEncode(db.out_, h.modes, h.L);
     if Length(lines) <> h.L.dataLength then begin d := nil; Exit(dsBadStream); end;
     if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));
-  end else if h.L.coding = CODING_TGA_RLE then begin
-    { the packets again, from the pixels and their choices }
-    if not TgaRleRebuild(db.out_, h.side, h.L, PixelBytes(h.L), h.L.dataLength, lines) then begin
+  end else if SideCoded(h.L) then begin
+    { the coded pixels again, from the pixels and the coder's choices }
+    if not CodedRebuild(s, h.hdrFirst, db.out_, h.side, h.L, lines) then begin
       d := nil; Exit(dsBadStream);
     end;
     if Length(lines) > 0 then Move(lines[0], d[h.L.dataOffset], Length(lines));

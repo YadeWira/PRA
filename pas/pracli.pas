@@ -129,7 +129,7 @@ end;
 
 procedure Usage(code: Integer);
 begin
-  Writeln('pra ', PRA_VERSION, ' - lossless recompression of raster images (PNM, PAM, PFM, BMP, HDR, TGA, Sun, farbfeld, WBMP)');
+  Writeln('pra ', PRA_VERSION, ' - lossless recompression of raster images (PNM, PAM, PFM, BMP, HDR, TGA, Sun, PCX, farbfeld, WBMP)');
   Writeln;
   Writeln('usage: pra a [options] FILE...     compress to .pra');
   Writeln('       pra x [options] FILE...     extract from .pra');
@@ -360,6 +360,7 @@ begin
       rfTGA: Result := '.tga';
       rfSUN: Result := '.ras';
       rfWBMP: Result := '.wbmp';
+      rfPCX: Result := '.pcx';
     end;
 end;
 
