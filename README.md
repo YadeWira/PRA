@@ -58,7 +58,7 @@ bands of a big image on several threads (`-th`, up to 8 by default):
 Memory grows with the threads: each band has its models, and `a` decodes
 each band beside it as it codes it, to check it.
 
-Status: 0.1.0, the first release ([the releases](https://github.com/YadeWira/PRA/releases)): its streams are version 4 (an image) and 3 (several), and a later version reads them. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
+Status: 0.1.0, the first release ([the releases](https://github.com/YadeWira/PRA/releases)). Until 1.0.0 the stream and the container may change with no promise: a `.pra` made by a 0.x may not open in a later version. From 1.0.0 on, what is released is read for ever. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
 
 | Layer | Unit | Status |
 |---|---|---|

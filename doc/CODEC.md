@@ -51,8 +51,9 @@ Versions 1 and 2 (the model before the match models, never released) are
 refused: a stream of another model cannot be decoded by this one.
 
 Version 4 (an image) and version 3 (several) are those of PRA 0.1.0, the
-first release: from there on a stream is never changed, and a later PRA
-reads every version it has released.
+first release. Until 1.0.0 the stream (and the container) may still change,
+with no promise that a later version opens what a 0.x made; from 1.0.0 on,
+every version released is read for ever.
 
 ## Stream of parts, version 3
 
