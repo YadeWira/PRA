@@ -11,7 +11,7 @@ code with packPNM and does not read its files.
 The original comes back **byte for byte**, and nothing is written unless it
 verified.
 
-Status: design phase. Limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
+Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
 
 | Layer | Unit | Status |
 |---|---|---|
@@ -20,7 +20,8 @@ Status: design phase. Limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, e
 | raster layout, limits | `pas/praraster.pas`, `pas/pralimits.pas` | done |
 | Netpbm parser (P4-P7, PF/Pf) | `pas/prapnm.pas` | done |
 | more parsers | | BMP, HDR, then [the list](doc/FORMATS.md) |
-| model and codec stream | | |
+| model (counters, mixers, APM) | `pas/pramodel.pas` | first version |
+| codec stream (version 1) | `pas/pracodec.pas` | first version: 8.8% smaller than packPNM on the files both take |
 | container | | |
 | command line | | |
 
