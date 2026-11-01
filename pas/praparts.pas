@@ -20,6 +20,9 @@
     uncompressed or PackBits, as images (strips that follow each other
     joined into one, tiles stacked into one as wide as a tile); the header,
     the directories, anything else, bytes.
+  - XCF (GIMP, versions 0 to 3, run-length): each layer's, mask's and
+    channel's first level (its tiles, one after another) an image; the
+    rest (the structures, the tile pointers, the lower levels) bytes.
   - PSD and PSB: each layer's channels and the composite image, raw or
     PackBits (its table of row lengths kept as bytes), each an image (the
     composite's channels interleaved); the rest, bytes.
@@ -745,6 +748,105 @@ begin
   Result := True;
 end;
 
+{ ---------- XCF (GIMP) ---------- }
+
+{ past a property list (id, length, data) to its end (id 0); -1 if broken }
+function XcfProps(const d: TBytes; p: Int64; var compression: Integer): Int64;
+var id, len, n: Int64;
+begin
+  Result := -1; n := 0;
+  while (p + 8 <= Length(d)) and (n < 100000) do begin
+    id := U32BE(d, p); len := U32BE(d, p + 4);
+    if (len < 0) or (len > Length(d) - p - 8) then Exit;
+    if (id = 17) and (len >= 1) then compression := d[p + 8];
+    Inc(p, 8 + len); Inc(n);
+    if id = 0 then Exit(p);
+  end;
+end;
+
+{ a hierarchy's first level, as an image region }
+procedure XcfLevel(const d: TBytes; hp: Int64; var regs: TTiffRegions);
+var bpp, lp, w, h, first, used: Int64; R: TTiffRegion;
+begin
+  if (hp <= 0) or (hp + 16 > Length(d)) then Exit;
+  bpp := U32BE(d, hp + 8); lp := U32BE(d, hp + 12);
+  if (bpp < 1) or (bpp > 4) or (lp <= 0) or (lp + 12 > Length(d)) then Exit;
+  w := U32BE(d, lp); h := U32BE(d, lp + 4); first := U32BE(d, lp + 8);
+  if (w < 1) or (h < 1) or (w > MAX_DIMENSION) or (h > MAX_DIMENSION) or (first <= 0) or (first >= Length(d)) then Exit;
+  if XcfLength(d, first, w, h, bpp, used) <> psOk then Exit;
+  R.L.Clear;
+  R.L.format := rfXCF; R.L.coding := CODING_XCF;
+  R.L.width := w; R.L.height := h; R.L.channels := bpp; R.L.bits := 8; R.L.maxval := 255;
+  R.L.dataOffset := 0; R.L.dataLength := used; R.L.rowBytes := w * bpp;
+  R.first := first; R.len := used; R.joinable := False; R.key := Length(regs);
+  SetLength(regs, Length(regs) + 1); regs[High(regs)] := R;
+end;
+
+function SplitXcf(const d: TBytes; var parts: TParts): Boolean;
+const MAGIC = 'gimp xcf ';
+var
+  k, j, comp: Integer; p, v, q, nl, hp, mp: Int64; ptrs: TInt64Array; regs: TTiffRegions; tmp: TTiffRegion;
+  isChannel: Boolean;
+begin
+  Result := False;
+  if Length(d) < 30 then Exit;
+  for k := 1 to 9 do if d[k - 1] <> Ord(MAGIC[k]) then Exit;
+  { "file" or v001 to v003: 32-bit pointers, 8-bit samples }
+  if not ((d[9] = Ord('f')) or ((d[9] = Ord('v')) and (d[10] = Ord('0')) and (d[11] = Ord('0')) and (d[12] in [Ord('1')..Ord('3')]))) then Exit;
+  comp := 0;
+  p := XcfProps(d, 26, comp);
+  if (p < 0) or (comp <> 1) then Exit;
+  { the layers' pointers, then the channels' }
+  ptrs := nil;
+  for j := 0 to 1 do
+    while True do begin
+      v := U32BE(d, p); Inc(p, 4);
+      if v < 0 then Exit;
+      if v = 0 then Break;
+      if Length(ptrs) > 65536 then Exit;
+      SetLength(ptrs, Length(ptrs) + 1); ptrs[High(ptrs)] := v * 2 + j;    { the low bit: a channel }
+    end;
+  regs := nil;
+  for k := 0 to High(ptrs) do begin
+    q := ptrs[k] shr 1; isChannel := Odd(ptrs[k]);
+    if (q <= 0) or (q + 16 > Length(d)) then Continue;
+    { a layer: width, height, type, name; a channel: width, height, name }
+    if isChannel then nl := U32BE(d, q + 8) else nl := U32BE(d, q + 12);
+    if (nl < 0) or (nl > 65536) then Continue;
+    if isChannel then q := q + 12 + nl else q := q + 16 + nl;
+    q := XcfProps(d, q, comp);
+    if (q < 0) or (q + 4 > Length(d)) then Continue;
+    hp := U32BE(d, q);
+    XcfLevel(d, hp, regs);
+    if not isChannel then begin
+      { a layer mask: a channel of its own }
+      mp := U32BE(d, q + 4);
+      if (mp > 0) and (mp + 12 <= Length(d)) then begin
+        nl := U32BE(d, mp + 8);
+        if (nl >= 0) and (nl <= 65536) then begin
+          q := XcfProps(d, mp + 12 + nl, comp);
+          if (q > 0) and (q + 4 <= Length(d)) then XcfLevel(d, U32BE(d, q), regs);
+        end;
+      end;
+    end;
+  end;
+  if regs = nil then Exit;
+  for k := 1 to High(regs) do begin
+    j := k; tmp := regs[k];
+    while (j > 0) and (regs[j - 1].first > tmp.first) do begin regs[j] := regs[j - 1]; Dec(j); end;
+    regs[j] := tmp;
+  end;
+  for k := 1 to High(regs) do if regs[k].first < regs[k - 1].first + regs[k - 1].len then Exit;
+  p := 0;
+  for k := 0 to High(regs) do begin
+    AddBytes(parts, p, regs[k].first - p);
+    AddImage(parts, regs[k].first, regs[k].len, regs[k].L);
+    p := regs[k].first + regs[k].len;
+  end;
+  AddBytes(parts, p, Length(d) - p);
+  Result := True;
+end;
+
 function SplitFile(const d: TBytes; st: TParseStatus; const L: TRasterLayout;
                    out parts: TParts; out fmt: TRasterFormat): Boolean;
 begin
@@ -765,6 +867,8 @@ begin
   if SplitTiff(d, parts) then begin fmt := rfTIFF; Exit(True); end;
   parts := nil;
   if SplitPsd(d, parts) then begin fmt := rfPSD; Exit(True); end;
+  parts := nil;
+  if SplitXcf(d, parts) then begin fmt := rfXCF; Exit(True); end;
   parts := nil;
   if SplitIco(d, parts, fmt) then Exit(True);
   parts := nil; fmt := rfNone;

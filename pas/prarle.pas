@@ -156,7 +156,24 @@ function MiffRleRebuild(const raw, side: TBytes; ps: Integer; usedLimit: Int64; 
 { a packet holds at most 256 pixels in ps + 1 bytes }
 function MiffRleFits(npix: Int64; ps: Integer; available: Int64): Boolean;
 
+{ ---------- XCF (GIMP) tiles, run-length ---------- }
+
+{ A level's tiles (64 x 64, the last of a row or column smaller), one
+  after the other from d[first], each its bpp planes one after another,
+  each plane run-length coded: n <= 126, n + 1 copies of the next byte;
+  127, a 16-bit count then the byte; 128, a 16-bit count then as many
+  bytes; n >= 129, 256 - n bytes. The image (w x h x bpp, interleaved),
+  the choices coded (side), the length. }
+function XcfScan(const d: TBytes; first: SizeInt; w, h: Int64; bpp: Integer;
+                 out raw, side: TBytes; out used: Int64): TParseStatus;
+function XcfLength(const d: TBytes; first: SizeInt; w, h: Int64; bpp: Integer; out used: Int64): TParseStatus;
+function XcfRebuild(const raw, side: TBytes; w, h: Int64; bpp: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
+{ at worst 3 bytes for a run of up to 65535 }
+function XcfFits(w, h: Int64; bpp: Integer; available: Int64): Boolean;
+
 implementation
+
+uses Math;
 
 
 procedure TPacketCoder.Init(encode: Boolean; const data: TBytes);
@@ -1308,6 +1325,192 @@ begin
     coded[o + ps] := c - 1;
     Inc(o, ps + 1); Inc(n, c);
   end;
+  Result := o = usedLimit;
+end;
+
+
+{ ---------- XCF tiles ---------- }
+
+const
+  XCF_TILE = 64;
+
+function XcfFits(w, h: Int64; bpp: Integer; available: Int64): Boolean;
+begin
+  Result := (w >= 1) and (h >= 1) and (bpp >= 1) and (bpp <= 4) and (w <= MAX_RAW) and (h <= MAX_RAW div w)
+    and (w * h <= MAX_RAW div bpp) and (available >= 0)
+    and (((w + XCF_TILE - 1) div XCF_TILE) * ((h + XCF_TILE - 1) div XCF_TILE) * bpp * 2 <= available);
+end;
+
+{ one token at d[p]: count bytes, a run or not, long form or not, its size }
+function ReadXcfToken(const d: TBytes; p: SizeInt; out count, isRun, isLong, size: Integer): Boolean;
+var n: Integer;
+begin
+  Result := False; count := 0; isRun := 0; isLong := 0; size := 0;
+  if p >= Length(d) then Exit;
+  n := d[p];
+  if n <= 126 then begin count := n + 1; isRun := 1; size := 2; end
+  else if n >= 129 then begin count := 256 - n; size := 1 + count; end
+  else begin
+    if p + 3 > Length(d) then Exit;
+    count := (d[p + 1] shl 8) or d[p + 2]; isLong := 1;
+    if n = 127 then begin isRun := 1; size := 4; end else size := 3 + count;
+  end;
+  Result := (count >= 1) and (p + size <= Length(d));
+end;
+
+{ a plane of a tile (tw x th of channel c at (x0, y0)) to bytes and back }
+procedure XcfPlane(var raw, plane: TBytes; w: Int64; bpp: Integer; x0, y0, tw, th, c: Integer; toPlane: Boolean);
+var x, y: Integer; o: Int64;
+begin
+  for y := 0 to th - 1 do
+    for x := 0 to tw - 1 do begin
+      o := ((Int64(y0) + y) * w + x0 + x) * bpp + c;
+      if toPlane then plane[y * tw + x] := raw[o] else raw[o] := plane[y * tw + x];
+    end;
+end;
+
+function XcfLength(const d: TBytes; first: SizeInt; w, h: Int64; bpp: Integer; out used: Int64): TParseStatus;
+var p: SizeInt; tx, ty, c, n, k, cnt, isRun, isLong, size: Integer; across, down: Int64;
+begin
+  used := 0;
+  if not XcfFits(w, h, bpp, Length(d) - first) then Exit(psTruncated);
+  across := (w + XCF_TILE - 1) div XCF_TILE; down := (h + XCF_TILE - 1) div XCF_TILE;
+  p := first;
+  for ty := 0 to Integer(down) - 1 do
+    for tx := 0 to Integer(across) - 1 do
+      for c := 0 to bpp - 1 do begin
+        n := Integer(Min(XCF_TILE, w - Int64(tx) * XCF_TILE) * Min(XCF_TILE, h - Int64(ty) * XCF_TILE));
+        k := 0;
+        while k < n do begin
+          if not ReadXcfToken(d, p, cnt, isRun, isLong, size) then Exit(psTruncated);
+          if k + cnt > n then Exit(psMalformed);
+          Inc(k, cnt); Inc(p, size);
+        end;
+      end;
+  used := p - first;
+  Result := psOk;
+end;
+
+{ a token's choices, both ways: run or literal against the run and the
+  literal a usual writer sees there; the form; the count }
+procedure CodeXcfToken(var pc: TPacketCoder; const plane: TBytes; k, n: Integer; var prevRun: Integer;
+                       var isRun, isLong, count: Integer);
+var er, lit2, lit3, j, ctx: Integer;
+begin
+  er := 1;
+  while (k + er < n) and (plane[k + er] = plane[k]) do Inc(er);
+  lit2 := 0; lit3 := 0; j := 1;
+  while k + j < n do begin
+    if (lit2 = 0) and (k + j + 1 < n) and (plane[k + j] = plane[k + j + 1]) then lit2 := j;
+    if (k + j + 2 < n) and (plane[k + j] = plane[k + j + 1]) and (plane[k + j] = plane[k + j + 2]) then begin lit3 := j; Break; end;
+    Inc(j);
+  end;
+  if lit3 = 0 then lit3 := n - k;
+  if lit2 = 0 then lit2 := lit3;
+  ctx := BmpBucket(er) + 8 * prevRun;
+  isRun := pc.Bit(ctx, isRun);
+  if isRun <> 0 then begin
+    if pc.Bit(32 + BmpBucket(er), Ord(count = er)) <> 0 then count := er
+    else count := pc.Tree(1024, count - 1, 13) + 1;
+  end else begin
+    if pc.Bit(48 + BmpBucket(lit3), Ord(count = lit3)) <> 0 then count := lit3
+    else if pc.Bit(64 + BmpBucket(lit2), Ord(count = lit2)) <> 0 then count := lit2
+    else count := pc.Tree(1024 + 8192, count - 1, 13) + 1;
+  end;
+  { the long form: forced past 127, a choice below }
+  if count > 127 then isLong := 1 else isLong := pc.Bit(80 + isRun, isLong);
+  prevRun := isRun;
+end;
+
+function XcfScan(const d: TBytes; first: SizeInt; w, h: Int64; bpp: Integer;
+                 out raw, side: TBytes; out used: Int64): TParseStatus;
+var
+  p: SizeInt; tx, ty, c, n, k, j, cnt, isRun, isLong, size, tw, th, prevRun, r2, l2, c2: Integer;
+  across, down: Int64; plane: TBytes; pc: TPacketCoder; pass: Integer;
+begin
+  raw := nil; side := nil;
+  Result := XcfLength(d, first, w, h, bpp, used);
+  if Result <> psOk then Exit;
+  SetLength(raw, w * h * bpp);
+  plane := nil; SetLength(plane, XCF_TILE * XCF_TILE);
+  across := (w + XCF_TILE - 1) div XCF_TILE; down := (h + XCF_TILE - 1) div XCF_TILE;
+  pc.Init(True, nil);
+  { two passes: the pixels, then the choices (which look at the plane) }
+  for pass := 0 to 1 do begin
+    p := first;
+    for ty := 0 to Integer(down) - 1 do
+      for tx := 0 to Integer(across) - 1 do begin
+        tw := Integer(Min(XCF_TILE, w - Int64(tx) * XCF_TILE)); th := Integer(Min(XCF_TILE, h - Int64(ty) * XCF_TILE));
+        n := tw * th;
+        for c := 0 to bpp - 1 do begin
+          k := 0; prevRun := 0;
+          if pass = 1 then XcfPlane(raw, plane, w, bpp, tx * XCF_TILE, ty * XCF_TILE, tw, th, c, True);
+          while k < n do begin
+            ReadXcfToken(d, p, cnt, isRun, isLong, size);
+            if pass = 0 then begin
+              if isRun <> 0 then for j := 0 to cnt - 1 do plane[k + j] := d[p + size - 1]
+              else for j := 0 to cnt - 1 do plane[k + j] := d[p + size - cnt + j];
+            end else begin
+              r2 := isRun; l2 := isLong; c2 := cnt;
+              CodeXcfToken(pc, plane, k, n, prevRun, r2, l2, c2);
+            end;
+            Inc(k, cnt); Inc(p, size);
+          end;
+          if pass = 0 then XcfPlane(raw, plane, w, bpp, tx * XCF_TILE, ty * XCF_TILE, tw, th, c, False);
+        end;
+      end;
+  end;
+  side := pc.enc.Finish;
+end;
+
+function XcfRebuild(const raw, side: TBytes; w, h: Int64; bpp: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
+var
+  o: SizeInt; tx, ty, c, n, k, j, cnt, isRun, isLong, tw, th, prevRun: Integer;
+  across, down: Int64; plane, r: TBytes; pc: TPacketCoder;
+begin
+  coded := nil; Result := False;
+  if not XcfFits(w, h, bpp, High(Int64) shr 2) or (Length(raw) <> w * h * bpp) or (usedLimit < 0) then Exit;
+  SetLength(coded, usedLimit);
+  plane := nil; SetLength(plane, XCF_TILE * XCF_TILE);
+  r := raw;
+  across := (w + XCF_TILE - 1) div XCF_TILE; down := (h + XCF_TILE - 1) div XCF_TILE;
+  pc.Init(False, side);
+  o := 0;
+  for ty := 0 to Integer(down) - 1 do
+    for tx := 0 to Integer(across) - 1 do begin
+      tw := Integer(Min(XCF_TILE, w - Int64(tx) * XCF_TILE)); th := Integer(Min(XCF_TILE, h - Int64(ty) * XCF_TILE));
+      n := tw * th;
+      for c := 0 to bpp - 1 do begin
+        XcfPlane(r, plane, w, bpp, tx * XCF_TILE, ty * XCF_TILE, tw, th, c, True);
+        k := 0; prevRun := 0;
+        while k < n do begin
+          isRun := 0; isLong := 0; cnt := 1;
+          CodeXcfToken(pc, plane, k, n, prevRun, isRun, isLong, cnt);
+          if (cnt < 1) or (k + cnt > n) then Exit;
+          if isRun <> 0 then begin
+            for j := 1 to cnt - 1 do if plane[k + j] <> plane[k] then Exit;   { only a damaged side }
+            if isLong <> 0 then begin
+              if o + 4 > usedLimit then Exit;
+              coded[o] := 127; coded[o + 1] := cnt shr 8; coded[o + 2] := cnt and 255; coded[o + 3] := plane[k]; Inc(o, 4);
+            end else begin
+              if (cnt > 127) or (o + 2 > usedLimit) then Exit;
+              coded[o] := cnt - 1; coded[o + 1] := plane[k]; Inc(o, 2);
+            end;
+          end else begin
+            if isLong <> 0 then begin
+              if o + 3 + cnt > usedLimit then Exit;
+              coded[o] := 128; coded[o + 1] := cnt shr 8; coded[o + 2] := cnt and 255; Inc(o, 3);
+            end else begin
+              if (cnt > 127) or (o + 1 + cnt > usedLimit) then Exit;
+              coded[o] := 256 - cnt; Inc(o);
+            end;
+            for j := 0 to cnt - 1 do coded[o + j] := plane[k + j];
+            Inc(o, cnt);
+          end;
+          Inc(k, cnt);
+        end;
+      end;
+    end;
   Result := o = usedLimit;
 end;
 

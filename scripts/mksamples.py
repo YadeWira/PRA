@@ -851,3 +851,55 @@ write('miff_16.miff', b'id=ImageMagick\nclass=DirectClass  matte=False\ncolumns=
 w, h = 24, 14
 rgba = b''.join(bytes([smooth(x // 3 * 3, y // 2 * 2, c, 255) for c in range(3)] + [255]) for y in range(h) for x in range(w))
 write('miff_rgba_rle.miff', b'id=ImageMagick\nclass=DirectClass  alpha-trait=Blend\ncompression=RLE\ncolumns=%d  rows=%d  depth=8\n\x0c\n:\x1a' % (w, h) + miff_rle(rgba, 4))
+
+# XCF (GIMP, version 0): two layers (RGBA across two tiles, RGB), the
+# first with a mask; tiles run-length coded the way GIMP does
+def xcf_rle(plane):
+    out = bytearray(); i = 0; n = len(plane)
+    while i < n:
+        r = 1
+        while i + r < n and plane[i + r] == plane[i] and r < 32768: r += 1
+        if r >= 2:
+            out += (bytes([r - 1, plane[i]]) if r < 128 else bytes([127, r >> 8, r & 255, plane[i]])); i += r; continue
+        j = i + 1
+        while j < n and not (j + 1 < n and plane[j] == plane[j + 1]) and j - i < 32768: j += 1
+        c = j - i
+        out += (bytes([256 - c]) if c < 128 else bytes([128, c >> 8, c & 255])) + plane[i:j]; i = j
+    return bytes(out)
+def xcf(name, w, h, layers):
+    head = bytearray(b'gimp xcf file\0' + struct.pack('>III', w, h, 0))
+    head += struct.pack('>II', 17, 1) + b'\x01' + struct.pack('>II', 0, 0)    # compression RLE, end
+    ptr_at = len(head)
+    head += bytes(4 * (len(layers) + 1) + 4)                                  # layer pointers, 0, channel 0
+    blob = bytearray(head)
+    def level(lw, lh, bpp, px):
+        tiles = []
+        for ty in range(0, lh, 64):
+            for tx in range(0, lw, 64):
+                tw, th = min(64, lw - tx), min(64, lh - ty)
+                t = b''
+                for c in range(bpp):
+                    t += xcf_rle(bytes(px(tx + x, ty + y, c) for y in range(th) for x in range(tw)))
+                tiles.append(t)
+        lv = len(blob)
+        blob.extend(struct.pack('>II', lw, lh)); tp = len(blob); blob.extend(bytes(4 * (len(tiles) + 1)))
+        for k, t in enumerate(tiles):
+            struct.pack_into('>I', blob, tp + 4 * k, len(blob)); blob.extend(t)
+        hi = len(blob)
+        blob.extend(struct.pack('>IIII', lw, lh, bpp, lv) + struct.pack('>I', 0))
+        return hi
+    lptrs = []
+    for (lw, lh, bpp, px, mask) in layers:
+        hier = level(lw, lh, bpp, px)
+        mptr = 0
+        if mask:
+            mh = level(lw, lh, 1, mask)
+            mptr = len(blob)
+            blob.extend(struct.pack('>II', lw, lh) + struct.pack('>I', 5) + b'mask\0' + struct.pack('>II', 0, 0) + struct.pack('>I', mh))
+        lptrs.append(len(blob))
+        blob.extend(struct.pack('>III', lw, lh, 1 if bpp == 4 else 0) + struct.pack('>I', 6) + b'layer\0'
+                    + struct.pack('>II', 0, 0) + struct.pack('>II', hier, mptr))
+    for k, lp in enumerate(lptrs): struct.pack_into('>I', blob, ptr_at + 4 * k, lp)
+    write(name, bytes(blob))
+xcf('xcf_layers.xcf', 70, 40, [(70, 40, 4, lambda x, y, c: 255 if c == 3 else smooth(x, y, c, 255), lambda x, y, c: 255 if (x - 35) ** 2 + (y - 20) ** 2 < 300 else 0),
+                               (30, 20, 3, lambda x, y, c: ((x // 6) * 40 + c * 70) % 256, None)])

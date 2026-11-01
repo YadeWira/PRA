@@ -24,7 +24,8 @@ WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS, and files of several
 images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; and film and
 science: DPX, Cineon (10 bits packed too), FITS, VICAR, uncompressed DICOM
 and uncompressed OpenEXR; and containers: TIFF and BigTIFF (uncompressed
-and PackBits), PSD and PSB (layers too), IFF ILBM, PBM and ACBM, MIFF; see
+and PackBits), PSD and PSB (layers too), IFF ILBM, PBM and ACBM, MIFF,
+GIMP's XCF; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,

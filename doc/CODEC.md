@@ -381,6 +381,16 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
 
+### 01/11/2026: XCF
+
+GIMP's files (versions 0 to 3, run-length): each layer's, mask's and
+channel's first level is one image, its tiles (64 x 64) decoded into it;
+the run-length choices (run or literal, short or long form, the count
+against the run and the literal a usual writer makes) coded beside. 10
+corpus files, 18.7 MB -> 9.99 MB, every one back byte for byte, every one
+below xz (body1_300dpi 3.67 MB against 4.42; example.xcf 1.19 against
+1.87; test.xcf 159 KB against 320).
+
 ### 01/11/2026: MIFF
 
 17 files of the corpus, 3.85 MB -> 467 KB (12.1%), every one back byte for

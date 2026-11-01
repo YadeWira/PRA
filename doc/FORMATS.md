@@ -52,7 +52,8 @@ work in place).
 | PSD | raw / PackBits | psd 15 | **done**: the composite (interleaved) and each layer's channels and mask, raw or PackBits; PSB too; ZIP not yet |
 | IFF ILBM | ByteRun1, bitplanes | iffILBM 128 | **done**: ILBM (1-8, 24, 32 planes), PBM, ACBM; not RGBN/RGB8, VDAT, mask planes |
 | MIFF | raw / RLE | miff 18 | **done**: PseudoClass and DirectClass (gray, RGB, CMYK, alpha), 8 and 16 bits, ImageMagick's RLE, old and new headers, montages; not Zip/BZip |
-| PICT, XCF | PackBits opcodes / GIMP RLE tiles | pict 67, xcf 10 | next |
+| XCF | GIMP RLE tiles | xcf 10 | **done**: versions 0-3 (8 bits), RLE; each layer's, mask's and channel's first level an image |
+| PICT | PackBits opcodes | pict 67 | next |
 | Palm, Intergraph, VTF | raw / RLE / DXT | palmBitmap 11, intergraphRasterImage 12, vtf 10 | left: Palm's files are tiny (44 KB in all), Intergraph's are CCITT G4 or 1-bit runs, every VTF is DXT |
 
 ## Out of scope

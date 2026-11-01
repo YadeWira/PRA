@@ -378,6 +378,7 @@ begin
     rfPSD: Result := '.psd';
     rfIFF: Result := '.iff';
     rfMIFF: Result := '.miff';
+    rfXCF: Result := '.xcf';
   end;
 end;
 

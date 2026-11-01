@@ -577,15 +577,21 @@ begin
   Check(ParseMiff(dd, L) = psTruncated, 'MIFF run-length cut short: truncated');
   Check(ParseMiff(Bytes('id=ImageMagick class=DirectClass columns=3 rows=2 compression=Zip'#12#10':'#26'xx'), L) = psUnsupported,
     'MIFF of Zip: unsupported');
+  d := ReadAll(dirC + '/xcf_layers.xcf');
+  Check(Split(d, parts, fmt) and (fmt = rfXCF) and Covers(d, parts) and (Kinds(parts) = 'bibibib')
+    and (parts[1].L.coding = CODING_XCF) and (parts[1].L.channels = 4) and (parts[3].L.channels = 1),
+    'xcf_layers.xcf: two layers and a mask, their tiles as images');
+  dd := Copy(d, 0, Length(d)); dd[9] := Ord('v'); dd[10] := Ord('0'); dd[11] := Ord('1'); dd[12] := Ord('1');
+  Check(not Split(dd, parts, fmt), 'XCF v011 (64-bit pointers): not split');
   { mutated containers: never an exception, the parts always the whole file }
-  samples := nil; SetLength(samples, 6);
-  samples[5] := ReadAll(dirC + '/miff_pseudo_rle.miff');
+  samples := nil; SetLength(samples, 7);
+  samples[5] := ReadAll(dirC + '/miff_pseudo_rle.miff'); samples[6] := ReadAll(dirC + '/xcf_layers.xcf');
   samples[0] := ReadAll(dirC + '/tiff_planar_gap.tif'); samples[1] := ReadAll(dirC + '/psd_layers_rle.psd');
   samples[2] := ReadAll(dirC + '/tiff_big.tif'); samples[3] := ReadAll(dirC + '/ilbm_5planes.iff');
   samples[4] := ReadAll(dirC + '/tiff_tiles.tif');
   bad := 0; oks := 0;
   for i := 1 to 10000 do begin
-    d := Copy(samples[i mod 6], 0, Length(samples[i mod 6]));
+    d := Copy(samples[i mod 7], 0, Length(samples[i mod 7]));
     if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
     for k := 1 to 1 + Integer(Rand mod 3) do
       if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 1024)))] := Byte(Rand);
@@ -597,7 +603,7 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF, MIFF: no exception, the parts the whole file (%d split)', [oks]));
+  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF, MIFF, XCF: no exception, the parts the whole file (%d split)', [oks]));
 
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
@@ -646,5 +652,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 198) then Halt(1);
+  if (failures > 0) or (cells < 200) then Halt(1);
 end.
