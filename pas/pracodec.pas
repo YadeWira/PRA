@@ -924,7 +924,8 @@ begin
   h.bands := src.GetVarint(MAX_BANDS);
   if not src.ok or (h.bands < 1) or (h.bands > Lp.height) then Exit(dsBadStream);
   SetLength(h.bandFirst, h.bands); SetLength(h.bandLen, h.bands);
-  for k := 0 to h.bands - 2 do h.bandLen[k] := src.GetVarint(High(Int64) shr 1);
+  { a band is never longer than the stream (and bandLen is 32-bit on i386) }
+  for k := 0 to h.bands - 2 do h.bandLen[k] := src.GetVarint(Length(s));
   if not src.ok then Exit(dsBadStream);
   h.pixFirst := src.p;
   rest := Length(s) - src.p;

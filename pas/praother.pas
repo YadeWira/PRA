@@ -405,7 +405,7 @@ begin
   L.format := rfXWD;
   L.width := F(4); L.height := F(5);
   L.bigEndian := order = 1;
-  case bpp of
+  case Cardinal(bpp) of
     1, 4, 8, 16: begin L.channels := 1; L.bits := bpp; end;
     24: begin L.channels := 3; L.bits := 8; end;
     32: begin L.channels := 4; L.bits := 8; end;
@@ -472,7 +472,7 @@ begin
   if (scheme <> 0) or (images <> 1) or (bands > 4) then Exit(psUnsupported);
   L.format := rfVIFF;
   L.width := F(520); L.height := F(524); L.channels := bands; L.bigEndian := be;
-  case storage of
+  case Cardinal(storage) of
     0: L.bits := 1;
     1: L.bits := 8;
     2: L.bits := 16;
@@ -485,7 +485,7 @@ begin
   { the colour map: map_row_size values for each of map_col_size entries }
   mapBytes := 0;
   if mapScheme <> 0 then begin
-    case mapStorage of
+    case Cardinal(mapStorage) of
       1: bpc := 1;
       2: bpc := 2;
       4, 5: bpc := 4;
@@ -523,7 +523,7 @@ begin
   if bands > MAX_CHANNELS then Exit(psUnsupported);
   L.channels := bands;
   L.bigEndian := be;
-  case fmt of
+  case Cardinal(fmt) of
     0, 1: L.bits := 8;        { unsigned and signed char }
     2, 3: L.bits := 16;       { unsigned and signed short }
     6: begin L.bits := 32; L.isFloat := True; end;
@@ -540,7 +540,7 @@ function ParseDds(const d: TBytes; out L: TRasterLayout): TParseStatus;
 const
   DDPF_FOURCC = $4;
   DDSCAPS2_VOLUME = $200000;
-var h, depth, pfFlags, bitCount, m, k, bytes: Int64;
+var h, depth, pfFlags, bitCount, m, bytes: Int64; k: Integer;
 begin
   L.Clear;
   if (Length(d) < 4) or (d[0] <> Ord('D')) or (d[1] <> Ord('D')) or (d[2] <> Ord('S')) or (d[3] <> 32) then
@@ -552,7 +552,7 @@ begin
   L.width := U32LE(d, 16); L.bigEndian := False;
   if (pfFlags and DDPF_FOURCC) <> 0 then
     { a Direct3D format number in place of four letters: the wide ones }
-    case U32LE(d, 84) of
+    case Cardinal(U32LE(d, 84)) of
       36, 110, 113: begin L.channels := 4; L.bits := 16; end;
       34, 112: begin L.channels := 2; L.bits := 16; end;
       111: begin L.channels := 1; L.bits := 16; end;
@@ -562,7 +562,7 @@ begin
     else begin L.format := rfNone; Exit(psUnsupported); end;   { DXT, BC, DX10 }
     end
   else
-    case bitCount of
+    case Cardinal(bitCount) of
       8: begin L.channels := 1; L.bits := 8; end;
       16: begin
         { two byte-wide masks (V8U8, A8L8): two channels; else one 16-bit value }
