@@ -686,6 +686,7 @@ begin
   if Result = psNotThis then Result := ParseFarbfeld(d, L);
   if Result = psNotThis then Result := ParseSun(d, L);
   if Result = psNotThis then Result := ParsePcx(d, L);
+  if Result = psNotThis then Result := ParseSgi(d, L);
   { no magic of their own: last, WBMP (which has to fill the file) first }
   if Result = psNotThis then Result := ParseWbmp(d, L);
   if Result = psNotThis then Result := ParseTga(d, L);
@@ -726,7 +727,7 @@ end;
 
 function SideCoded(const L: TRasterLayout): Boolean;
 begin
-  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX];
+  Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_SGI_RAW];
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
@@ -738,6 +739,13 @@ begin
   case L.coding of
     CODING_TGA_RLE: Result := TgaRleScan(d, L, PixelBytes(L), raw, side, used) = psOk;
     CODING_SUN_RLE: Result := ByteRleScan(brSun, d, L.dataOffset, R.dataLength, R.rowBytes, raw, side, used) = psOk;
+    CODING_SGI_RLE: Result := SgiRleScan(d, L.dataOffset, L.width, L.height, L.channels, L.bits div 8,
+                                         raw, side, used) = psOk;
+    CODING_SGI_RAW: begin
+      used := R.dataLength;
+      Result := L.dataOffset + used <= Length(d);
+      if Result then raw := SgiToPixels(Copy(d, L.dataOffset, used), L.width, L.height, L.channels, L.bits div 8);
+    end;
     CODING_PCX: begin
       if not PcxParams(d, 0, bpp, planes, bpl, lines) then Exit;
       Result := ByteRleScan(brPcx, d, L.dataOffset, Int64(lines) * planes * bpl, planes * bpl, dec, side, used) = psOk;
@@ -758,6 +766,11 @@ begin
   case L.coding of
     CODING_TGA_RLE: Result := TgaRleRebuild(raw, side, L, PixelBytes(L), L.dataLength, coded);
     CODING_SUN_RLE: Result := ByteRleRebuild(brSun, raw, side, R.rowBytes, L.dataLength, coded);
+    CODING_SGI_RLE: Result := SgiRleRebuild(raw, side, L.width, L.height, L.channels, L.bits div 8, L.dataLength, coded);
+    CODING_SGI_RAW: begin
+      coded := SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8);
+      Result := Length(coded) = L.dataLength;
+    end;
     CODING_PCX: begin
       if not PcxParams(hdr, hdrFirst, bpp, planes, bpl, lines) then Exit;
       Result := ByteRleRebuild(brPcx, PcxFromPixels(raw, bpp, planes, bpl, lines), side, planes * bpl,
@@ -775,6 +788,9 @@ begin
   case L.coding of
     CODING_TGA_RLE: Result := TgaRleFits(L.width, L.height, PixelBytes(L), L.dataLength);
     CODING_SUN_RLE: Result := ByteRleFits(brSun, R.dataLength, L.dataLength);
+    CODING_SGI_RLE: Result := (L.bits in [8, 16])
+      and SgiRleFits(L.width, L.height, L.channels, L.bits div 8, L.dataLength);
+    CODING_SGI_RAW: Result := (L.bits in [8, 16]) and (L.dataLength = R.dataLength) and (R.dataLength <= MAX_RAW);
     CODING_PCX: begin
       { the pixels' layout has to be the one the header gives (PcxFromPixels
         reads them by it), and the decoded lines have to fit }
@@ -836,8 +852,9 @@ begin
     rfPCX: h.L.coding := CODING_PCX;
     rfTGA: if (flags and 8) <> 0 then h.L.coding := CODING_TGA_RLE;
     rfSUN: if (flags and 8) <> 0 then h.L.coding := CODING_SUN_RLE;
+    rfSGI: if (flags and 8) <> 0 then h.L.coding := CODING_SGI_RLE else h.L.coding := CODING_SGI_RAW;
   end;
-  if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE]) then Exit(dsBadStream);
+  if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE]) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
     { the coded length within the cap, the image within what that length
       can hold, and the coder's choices }
@@ -1121,7 +1138,7 @@ begin
   if L.bigEndian then flags := flags or 1;
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
-  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE] then flags := flags or 8;
+  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE] then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
   rgbe := nil; modes := nil; side := nil;

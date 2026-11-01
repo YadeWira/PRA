@@ -10,7 +10,7 @@
     test_parsers <tests/bmp> <tests/hdr> <tests/other> }
 program test_parsers;
 {$I ../pra.inc}
-uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, pracodec;
+uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, prarle, pracodec;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
@@ -263,6 +263,30 @@ begin
     'ras_rle24.ras: run-length, rows of 81 bytes padded to 82');
   Check(ParseSun(Copy(d, 0, Length(d) - 1), L) = psTruncated, 'Sun run-length one byte short: truncated');
 
+  Writeln('SGI');
+  d := ReadAll(dirO + '/sgi_raw8.sgi'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfSGI) and (L.coding = CODING_SGI_RAW) and (L.channels = 3)
+    and (L.dataOffset = 512) and (L.dataLength = 25 * 14 * 3), 'sgi_raw8.sgi: verbatim, three planes');
+  d := ReadAll(dirO + '/sgi_rle_ymajor.rgb'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_SGI_RLE) and (L.channels = 4) and (L.dataOffset + L.dataLength = Length(d)),
+    'sgi_rle_ymajor.rgb: run-length, the tables and rows to the end');
+  d := ReadAll(dirO + '/sgi_rle16.sgi'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 16) and L.bigEndian, 'sgi_rle16.sgi: 16 bits, big-endian');
+  Check(ParseSgi(Copy(d, 0, 400), L) = psMalformed, 'SGI cut inside its header: malformed');
+  Check(ParseSgi(Copy(d, 0, Length(d) - 1), L) = psTruncated, 'SGI run-length one byte short: truncated');
+  dd := Copy(d, 0, Length(d)); dd[512 + 3] := dd[512 + 3] xor 1;
+  Check(ParseSgi(dd, L) = psUnsupported, 'SGI, a row not where the rows follow each other: unsupported');
+  dd := Copy(d, 0, Length(d)); dd[3] := 3;
+  Check(ParseSgi(dd, L) = psMalformed, 'SGI, 3 bytes a value: malformed');
+  dd := Copy(d, 0, Length(d)); dd[11] := 5;
+  Check(ParseSgi(dd, L) = psUnsupported, 'SGI, 5 channels: unsupported');
+  dd := Copy(d, 0, Length(d)); dd[6] := 255; dd[8] := 255;
+  Check(ParseSgi(dd, L) = psTruncated, 'SGI, 65280 x 65280 in a few bytes: nothing allocated');
+  SetLength(dd, 7 * 5 * 3 * 2);
+  for i := 0 to High(dd) do dd[i] := Byte(Rand);
+  rgbe := SgiFromPixels(SgiToPixels(dd, 7, 5, 3, 2), 7, 5, 3, 2);
+  Check(CompareMem(@rgbe[0], @dd[0], Length(dd)), 'SGI planes to pixels and back');
+
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
   Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
@@ -281,7 +305,7 @@ begin
       4: samples[High(samples)] := ReadAll(dirO + '/tga_mapped8.tga');
       5: samples[High(samples)] := ReadAll(dirO + '/pcx_ega.pcx');
       6: samples[High(samples)] := ReadAll(dirO + '/tga_rle_mapped.tga');
-    else samples[High(samples)] := ReadAll(dirO + '/wbmp_shape.wbmp');
+    else samples[High(samples)] := ReadAll(dirO + '/sgi_rle_ymajor.rgb');
     end;
   end;
   bad := 0; oks := 0;
@@ -303,5 +327,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 6 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 85) then Halt(1);
+  if (failures > 0) or (cells < 95) then Halt(1);
 end.

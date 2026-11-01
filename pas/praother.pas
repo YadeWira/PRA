@@ -20,6 +20,10 @@
     other; what follows (the 256-colour palette, $0C and 768 bytes) is the
     tail. 1, 2, 4 or 8 bits in one plane; 8 bits in 3 or 4 planes (RGB,
     RGBA); 1 bit in 2 to 4 planes (EGA's 16 colours).
+  - SGI (IRIS): magic 474, a 512-byte header, then the channels one after
+    the other (rows bottom to top, 1 or 2 bytes a value, big-endian),
+    verbatim or run-length coded with tables of rows (prarle). Up to 4
+    channels.
   - WBMP type 0: two zero bytes, width and height as multi-byte integers
     (7 bits a byte, the high bit set on all but the last), then 1-bit rows
     padded to a byte. }
@@ -38,6 +42,7 @@ function ParseTga(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseSun(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseWbmp(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParsePcx(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseSgi(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 { PCX: what its 128-byte header (at hdr[first..]) says of the planes: bits a
   pixel in a plane, planes, bytes a plane's line, lines. False if it is not
@@ -297,6 +302,41 @@ begin
     Result := ByteRleLength(brPcx, d, 128, Int64(lines) * planes * bpl, used);
   if Result <> psOk then begin L.format := rfNone; Exit; end;
   L.dataLength := used;
+end;
+
+{ ---------- SGI ---------- }
+
+function ParseSgi(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var storage, bpc, dim, xs, ys, zs: Integer; used, size: Int64;
+begin
+  L.Clear;
+  if (Length(d) < 2) or (d[0] <> 1) or (d[1] <> $DA) then Exit(psNotThis);
+  if Length(d) < 512 then Exit(psMalformed);
+  storage := d[2]; bpc := d[3];
+  dim := (d[4] shl 8) or d[5];
+  xs := (d[6] shl 8) or d[7]; ys := (d[8] shl 8) or d[9]; zs := (d[10] shl 8) or d[11];
+  if (storage > 1) or not (bpc in [1, 2]) or not (dim in [1, 2, 3]) then Exit(psMalformed);
+  if dim = 1 then begin ys := 1; zs := 1; end else if dim = 2 then zs := 1;
+  if (xs < 1) or (ys < 1) or (zs < 1) then Exit(psMalformed);
+  if zs > 4 then Exit(psUnsupported);
+  L.format := rfSGI;
+  L.width := xs; L.height := ys; L.channels := zs; L.bits := 8 * bpc; L.bigEndian := True;
+  L.maxval := (Int64(1) shl L.bits) - 1;
+  L.bottomUp := True;
+  L.dataOffset := 512;
+  if storage = 0 then begin
+    L.coding := CODING_SGI_RAW;
+    size := Int64(xs) * ys * zs * bpc;
+    if size > Length(d) - 512 then begin L.format := rfNone; Exit(psTruncated); end;
+    L.dataLength := size;
+    L.rowBytes := Int64(xs) * zs * bpc;
+    Exit(psOk);
+  end;
+  L.coding := CODING_SGI_RLE;
+  Result := SgiRleLength(d, 512, xs, ys, zs, bpc, used);
+  if Result <> psOk then begin L.format := rfNone; Exit; end;
+  L.dataLength := used;
+  L.rowBytes := Int64(xs) * zs * bpc;
 end;
 
 end.

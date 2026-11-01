@@ -27,10 +27,12 @@ up and the caller stores the file as it is.
 version     1 B     1
 header      varint length, then the bytes as they are
 layout      format 1 B, width, height, channels (varints), bits 1 B,
-            flags 1 B (bit 0 big-endian, bit 1 float, bit 2 bottom-up),
-            maxval (varint)
+            flags 1 B (bit 0 big-endian, bit 1 float, bit 2 bottom-up,
+            bit 3 run-length coded: TGA, Sun Raster, SGI), maxval (varint)
   HDR only: the scanlines' length (varint), then each line's run-length
             coder as runs: mode 1 B (0 flat, 1 Radiance, 2 stb), count (varint)
+  run-length TGA, Sun Raster, PCX, SGI: the coded length (varint), then the
+            coder's choices (varint length, then the bytes; prarle)
 tail        varint length, then the bytes as they are
   one channel of 2 to 8 bits only: the pixel mode, 1 B (0 samples, 1 indices)
 bands       how many (varint, 1 to 256 and at most the rows), then the length
@@ -48,8 +50,9 @@ stream is the same whatever the threads. Each band is decoded from its own
 copy of its bytes: what the arithmetic decoder reads past a band's end is
 zeros, exactly as when the encoder's verifier decoded it.
 
-Format numbers: 1 PBM, 2 PGM, 3 PPM, 4 PAM, 5 PFM, 6 BMP, 7 HDR. New formats
-take the next number; a number never changes meaning.
+Format numbers: 1 PBM, 2 PGM, 3 PPM, 4 PAM, 5 PFM, 6 BMP, 7 HDR, 8 farbfeld,
+9 TGA, 10 Sun Raster, 11 WBMP, 12 PCX, 13 SGI. New formats take the next
+number; a number never changes meaning.
 
 The decoder checks the layout against the limits (`pralimits`) and against
 the caller's cap on the output size **before** decoding anything.
@@ -99,6 +102,28 @@ the mixers and the APM selected by which neighbours are equal.
 pixels (a BMP's 4-byte alignment, a PBM's last bits). Several channels (a
 24-bit BMP): the padding bytes after the pixels, through a byte tree in a
 context of their position.
+
+**Run-length files, whoever wrote them** (`prarle`). A run-length coded
+file is its pixels plus its writer's choices: where each packet starts,
+whether it is a run or a literal, how long. Given both, the bytes follow.
+So the pixels go to the pixel coder like any others, and the choices are
+coded on their own, small, in contexts of what a usual coder would have
+done at that point (how many equal values follow, crossing rows and not;
+the literal it would write; the row's end). A writer that follows the usual
+rule costs a fraction of a bit a packet, one that does not costs more, and
+both come back byte for byte: nothing has to be recognised. Before this,
+the guess-the-coder way (as for HDR) reproduced 8 of the corpus's 10
+run-length TGAs; this way, all 10.
+- TGA 9-11: header byte (run bit, count) and one or count pixels; packets
+  may cross rows.
+- PCX: `$C0|n v` runs and literal bytes, in lines of planes; the planes are
+  turned into the pixels the model wants (8-bit planes interleaved as
+  channels, 1-bit planes merged into 4-bit indices).
+- Sun Raster type 2: `$80 n v` runs, `$80 0` a literal `$80`.
+- SGI: per-row packets with a zero at the end, and the tables of where each
+  row is: rebuilt from the rows when they lie one after the other right
+  after the tables (every file of the corpus), their order coded as steps.
+  SGI's planes (verbatim too) are interleaved as channels.
 
 **Radiance HDR.** The scanlines are decoded to RGBE (four 8-bit channels,
 green first, red and blue against it, the exponent last) and each line's
@@ -220,6 +245,17 @@ whichever of the two ways is smaller:
 
 PGM gained the mode byte too: a PGM's stream is one byte longer when the
 samples win (house.l.pgm: 32,126 -> 32,127).
+
+### 01/11/2026: the first batch of formats
+
+farbfeld, TGA (raw and run-length), Sun Raster (raw and run-length), WBMP,
+PCX and SGI (raw and run-length): 110 files of the local corpus, 168.3 MB,
+22.13% after compression; every one back byte for byte. Left out: 3 PCX
+files cut short, 1 file named .pcx that is not one, 1 TGA whose pixels do
+not fit its declared size. Some: a 33 MB TGA 11.8%, abydos.ff 2.9%,
+BUGLE.PCX 7.6%, a 17 MB 24-bit PCX 32.6%; sample_1920x1280.sgi
+(run-length) 2,743,857 against 2,731,248 for the same pixels as a PPM: its
+coder's choices and row order cost 0.4%.
 
 ### 01/11/2026: against packPNM 1.6d, the whole corpus
 

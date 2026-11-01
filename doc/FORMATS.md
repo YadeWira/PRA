@@ -19,18 +19,19 @@ work in place).
 
 ## Batch 1: header + raw/RLE pixels
 
-| Format | Pixels | Corpus folder (files) |
-|---|---|---|
-| farbfeld | 16-bit RGBA raw | farbfeld 3 |
-| TGA | raw / RLE | tga 36, bloodLaceCompressedTGA 8 |
-| PCX / DCX | RLE | pcx 34, dcx 11 |
-| SGI / RGB | raw / RLE, planar | sgi 16 |
-| Sun Raster | raw / RLE | sunRaster 12 |
-| ICO / CUR | DIB (reuses BMP) | ico 15, cur 15, icoOS2 12 |
-| WBMP | 1-bit raw | wirelessBMP 10 |
-| XWD | raw | xwd 11 |
-| MTV, VIFF, VIPS | raw | mtv 11, viff 13, vips 1 |
-| DDS uncompressed | raw (BCn is separate) | dds 16, ddsMIPChain 15 |
+| Format | Pixels | Corpus folder (files) | Status |
+|---|---|---|---|
+| farbfeld | 16-bit RGBA raw | farbfeld 3 | **done** |
+| TGA | raw / RLE | tga 36, bloodLaceCompressedTGA 8 | **done** (raw and RLE; not the BloodLace variant) |
+| PCX | RLE | pcx 34 | **done** |
+| DCX | several PCX | dcx 11 | |
+| SGI / RGB | raw / RLE, planar | sgi 16 | **done** |
+| Sun Raster | raw / RLE | sunRaster 12 | **done** |
+| ICO / CUR | DIB (reuses BMP) | ico 15, cur 15, icoOS2 12 | |
+| WBMP | 1-bit raw | wirelessBMP 10 | **done** |
+| XWD | raw | xwd 11 | |
+| MTV, VIFF, VIPS | raw | mtv 11, viff 13, vips 1 | |
+| DDS uncompressed | raw (BCn is separate) | dds 16, ddsMIPChain 15 | |
 
 ## Batch 2: film and science, high bit depth
 

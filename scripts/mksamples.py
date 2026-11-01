@@ -295,3 +295,48 @@ def sun2(name, depth, rowfn, w=27, h=15, randomly=False, cmap=b''):
 sun2('ras_rle24.ras', 24, lambda y: b''.join(bytes([flat(x, y, 2), 0x80 if x == 3 else flat(x, y, 1), flat(x, y, 0)]) for x in range(27)))
 sun2('ras_rle8_random.ras', 8, lambda y: bytes(128 if x % 9 == 0 else (x // 4) * 20 % 256 for x in range(27)), randomly=True,
      cmap=bytes(i * 3 % 256 for i in range(36)))
+
+# SGI: verbatim, and run-length with its tables, rows laid in table order
+# or row by row (channels interleaved), packets usual or random
+def sgi_head(storage, bpc, dim, xs, ys, zs):
+    return struct.pack('>HBBHHHHIII', 474, storage, bpc, dim, xs, ys, zs, 0, 255 if bpc == 1 else 65535, 0) \
+        + b'synthetic'.ljust(80, b'\0') + struct.pack('>I', 0) + bytes(404)
+
+def sgi_row_rle(vals, bpc, randomly):
+    u = (lambda v: bytes([v])) if bpc == 1 else (lambda v: struct.pack('>H', v))
+    out = bytearray(); i = 0; n = len(vals)
+    while i < n:
+        r = 1
+        while i + r < n and r < 127 and vals[i + r] == vals[i]: r += 1
+        if randomly and r > 1: r = 1 + rand() % r
+        if r >= 3:
+            out += u(r) + u(vals[i]); i += r; continue
+        j = i + 1
+        while j < n and j - i < 127 and not (j + 2 < n and vals[j] == vals[j + 1] == vals[j + 2]): j += 1
+        if randomly: j = i + 1 + rand() % (j - i)
+        out += u(0x80 | (j - i)) + b''.join(u(v) for v in vals[i:j]); i = j
+    return bytes(out) + u(0)
+
+def sgi(name, bpc, xs, ys, zs, val, rle, ymajor=False, randomly=False):
+    dim = 3 if zs > 1 else 2
+    head = sgi_head(1 if rle else 0, bpc, dim, xs, ys, zs)
+    if not rle:
+        data = b''.join((bytes([val(x, y, z)]) if bpc == 1 else struct.pack('>H', val(x, y, z)))
+                        for z in range(zs) for y in range(ys) for x in range(xs))
+        write(name, head + data); return
+    rows = ys * zs
+    order = [y + z * ys for y in range(ys) for z in range(zs)] if ymajor else list(range(rows))
+    first = 512 + 8 * rows; starts = [0] * rows; lens = [0] * rows; body = bytearray()
+    for idx in order:
+        y, z = idx % ys, idx // ys
+        enc = sgi_row_rle([val(x, y, z) for x in range(xs)], bpc, randomly)
+        starts[idx] = first + len(body); lens[idx] = len(enc); body += enc
+    write(name, head + struct.pack('>%dI' % rows, *starts) + struct.pack('>%dI' % rows, *lens) + body)
+
+sv = lambda x, y, z: flat(x, y, z)
+sgi('sgi_raw8.sgi', 1, 25, 14, 3, sv, False)
+sgi('sgi_raw16.sgi', 2, 20, 11, 4, lambda x, y, z: smooth(x, y, z, 65535), False)
+sgi('sgi_rle_rows.rgb', 1, 33, 17, 3, sv, True)
+sgi('sgi_rle_ymajor.rgb', 1, 30, 15, 4, sv, True, ymajor=True)
+sgi('sgi_rle_gray.bw', 1, 40, 12, 1, lambda x, y, z: flat(x, y, 0) // 16 * 16, True, randomly=True)
+sgi('sgi_rle16.sgi', 2, 18, 10, 3, lambda x, y, z: 3000 if 5 <= x < 12 else smooth(x, y, z, 65535), True, ymajor=True)

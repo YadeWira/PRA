@@ -31,7 +31,7 @@ uses SysUtils;
 type
   { new formats go at the end: the stream keeps their number }
   TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR,
-    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX);
+    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX, rfSGI);
 
   TParseStatus = (
     psOk,
@@ -48,6 +48,8 @@ const
   CODING_TGA_RLE = 2;   { TGA types 9, 10, 11 (prarle) }
   CODING_SUN_RLE = 3;   { Sun Raster type 2 (prarle) }
   CODING_PCX = 4;       { PCX (prarle, its planes: praother) }
+  CODING_SGI_RLE = 5;   { SGI run-length (prarle) }
+  CODING_SGI_RAW = 6;   { SGI verbatim: planes, interleaved for the codec (prarle) }
 
 type
   TRasterLayout = record
@@ -99,6 +101,7 @@ begin
     rfSUN: Result := 'Sun Raster';
     rfWBMP: Result := 'WBMP';
     rfPCX: Result := 'PCX';
+    rfSGI: Result := 'SGI';
   else Result := 'none';
   end;
 end;
