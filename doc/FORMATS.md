@@ -35,14 +35,14 @@ work in place).
 
 ## Batch 2: film and science, high bit depth
 
-| Format | Notes | Corpus folder (files) |
-|---|---|---|
-| DPX | 10-bit packed in 32-bit words | dpx 7 |
-| Cineon | same, predecessor of DPX | cin 13 |
-| FITS | big-endian int/float | fits 11 |
-| VICAR | NASA/JPL | vicar 10 |
-| DICOM uncompressed | 12/16-bit | dicom 11 |
-| OpenEXR | uncompressed/RLE first, ZIP/PIZ later | exr 12 |
+| Format | Notes | Corpus folder (files) | Status |
+|---|---|---|---|
+| DPX | 10-bit packed in 32-bit words | dpx 7 | **done**: 8, 10 (packing 1, 2), 12, 16 bits, floats; one image element |
+| Cineon | same, predecessor of DPX | cin 13 | **done**: 8 bits, 10 bits packed |
+| FITS | big-endian int/float | fits 11 | **done**: 8, 16 bits, floats; three planes; not 32/64-bit integers, doubles |
+| VICAR | NASA/JPL | vicar 10 | **done**: BYTE, HALF, REAL (IEEE); BSQ, BIP |
+| DICOM uncompressed | 12/16-bit | dicom 11 | **done**: implicit and explicit VR, 8/16 bits, gray and RGB, frames; not compressed transfer syntaxes |
+| OpenEXR | uncompressed/RLE first, ZIP/PIZ later | exr 12 | **done** uncompressed scanlines; RLE, ZIP, PIZ, tiles, deep not yet |
 
 ## Batch 3: complex containers
 

@@ -368,6 +368,12 @@ begin
     rfICO: Result := '.ico';
     rfCUR: Result := '.cur';
     rfDCX: Result := '.dcx';
+    rfDPX: Result := '.dpx';
+    rfCineon: Result := '.cin';
+    rfFITS: Result := '.fits';
+    rfVICAR: Result := '.vic';
+    rfDICOM: Result := '.dcm';
+    rfEXR: Result := '.exr';
   end;
 end;
 

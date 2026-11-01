@@ -33,7 +33,8 @@ type
   TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR,
     rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX, rfSGI, rfXWD, rfMTV, rfVIFF, rfVIPS, rfDDS,
     { files of several images (praparts): never an image's format }
-    rfICO, rfCUR, rfDCX);
+    rfICO, rfCUR, rfDCX,
+    rfDPX, rfCineon, rfFITS, rfVICAR, rfDICOM, rfEXR);
 
   TParseStatus = (
     psOk,
@@ -53,6 +54,8 @@ const
   CODING_SGI_RLE = 5;   { SGI run-length (prarle) }
   CODING_BMP_RLE = 7;   { BMP RLE8 and RLE4 (prarle) }
   CODING_PLAIN = 8;     { plain (text) PBM, PGM, PPM (praplain) }
+  CODING_PACK10 = 9;    { DPX, Cineon: 10-bit samples three to a 32-bit word (prasci) }
+  CODING_EXR = 10;      { OpenEXR scanlines: offsets, blocks, channels per line (prasci) }
   CODING_PLANES = 6;    { verbatim, the channels' planes one after the other
                           (SGI, VIFF): interleaved for the codec (prarle) }
 
@@ -118,6 +121,12 @@ begin
     rfICO: Result := 'ICO';
     rfCUR: Result := 'CUR';
     rfDCX: Result := 'DCX';
+    rfDPX: Result := 'DPX';
+    rfCineon: Result := 'Cineon';
+    rfFITS: Result := 'FITS';
+    rfVICAR: Result := 'VICAR';
+    rfDICOM: Result := 'DICOM';
+    rfEXR: Result := 'OpenEXR';
   else Result := 'none';
   end;
 end;

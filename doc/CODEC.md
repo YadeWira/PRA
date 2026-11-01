@@ -181,6 +181,19 @@ run-length TGAs; this way, all 10.
   an early end skips is 0. The data ends at the end of bitmap, or after
   the rows, or with the file (the decoder knows its length).
 
+**10 bits packed (DPX, Cineon).** Three samples a 32-bit word, from the
+top bits down (the two free bits below; or, DPX's packing 2, on top): the
+words are unpacked to 16-bit samples, three a word (a row's last word's
+spare samples too: the codec keeps them apart as padding), and the free
+bits are coded beside them (nearly free: they are 0). How the words are
+packed and their byte order, the decoder reads from the header.
+
+**OpenEXR scanlines.** The offsets of the lines and each line's head (its
+y, its size) are rebuilt from the layout and the data window's ymin;
+each line's channels, one after the other in the file, are interleaved for
+the model. A file whose lines are not one after the other, in order, is
+left.
+
 **Plain Netpbm (P1, P2, P3).** The numbers are an image (`praplain`); the
 writer's formatting is coded beside them: the separator before each
 number, a symbol at a time (space, LF, CR, TAB, another byte, the end), and
@@ -331,6 +344,19 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: film and science (batch 2)
+
+DPX, Cineon, FITS, VICAR, DICOM and OpenEXR (uncompressed): 50 files of
+the corpus, 166 MB, every one back byte for byte. Without the 51 MB
+Cineon, 49 files, 115.2 MB: 26.90%, against xz -9e's 35.9% (41.4 MB).
+Some: boy.cin (10 bits packed) 39.7% (xz 62.5%), the 11 MB 10-bit RGBA
+checkerboard DPX 6,407 bytes, n1355256227.1.map (VICAR HALF) 6.7%,
+CT.4032.1 (DICOM, 16 bits) 36.4% (xz 46.0%), abydos.exr (halves) 4.0%.
+Left: 9 OpenEXR files (ZIP, PIZ, tiles, deep). Fuzzing found a VICAR
+label that looped forever (a key not found moved the search back one
+byte), an EXR channel type that overflowed an integer, and a BMP RLE cut
+right after its header (no token: now truncated).
 
 ### 01/11/2026: BMP RLE8 and RLE4, plain Netpbm
 

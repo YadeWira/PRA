@@ -21,7 +21,9 @@ Today PRA takes PBM, PGM and PPM (binary and plain text), PAM and PFM, BMP
 (uncompressed, bitfields, RLE8 and RLE4), Radiance HDR, TGA, PCX, SGI, Sun Raster (each
 raw and run-length, given back byte for byte whoever wrote it), farbfeld,
 WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS, and files of several
-images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; see
+images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; and film and
+science: DPX, Cineon (10 bits packed too), FITS, VICAR, uncompressed DICOM
+and uncompressed OpenEXR; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,
@@ -36,6 +38,7 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | raster layout, limits | `pas/praraster.pas`, `pas/pralimits.pas` | done |
 | Netpbm parser (P1-P7, PF/Pf) | `pas/prapnm.pas` | done |
 | plain Netpbm text, any writer | `pas/praplain.pas` | done |
+| DPX, Cineon, FITS, VICAR, DICOM, OpenEXR | `pas/prasci.pas` | done |
 | BMP and Radiance HDR parsers | `pas/prabmp.pas`, `pas/prahdr.pas` | done |
 | farbfeld, TGA, Sun Raster, WBMP, PCX, SGI, XWD, MTV, VIFF, VIPS, DDS | `pas/praother.pas` | done |
 | run-length files, any writer | `pas/prarle.pas` | done (TGA, PCX, Sun Raster, SGI, BMP) |

@@ -25,7 +25,7 @@ unit prarle;
 
 interface
 
-uses SysUtils, praraster;
+uses SysUtils, praraster, praarith, pramodel;
 
 const
   { the largest image a coded file may expand to, in pixel bytes }
@@ -110,11 +110,7 @@ function BmpRleRebuild(const raw, side: TBytes; w, h: Int64; bits: Integer; used
   that skips most of its pixels is not worth the memory) and MAX_RAW }
 function BmpRleFits(w, h: Int64; bits: Integer; available: Int64): Boolean;
 
-implementation
-
-uses praarith, pramodel;
-
-{ ---------- the packets' coder ---------- }
+{ ---------- the packets' coder (praplain and prasci use it too) ---------- }
 
 const
   N_CTX = 1 shl 12;
@@ -132,6 +128,10 @@ type
     { v in [0, 2^nbits), MSB first, a tree of contexts under ctx }
     function Tree(ctx, v, nbits: Integer): Integer;
   end;
+
+
+implementation
+
 
 procedure TPacketCoder.Init(encode: Boolean; const data: TBytes);
 var i: Integer;
@@ -901,6 +901,8 @@ begin
     Inc(p, size);
   until t.kind in [BK_EOB, BK_STOP];
   used := p - first;
+  { not one token: nothing to code }
+  if used < 2 then Exit(psTruncated);
   if not BmpRleFits(w, h, bits, used) then Result := psUnsupported;
 end;
 

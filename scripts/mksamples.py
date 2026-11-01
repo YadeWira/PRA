@@ -539,3 +539,135 @@ for y in range(6):
     vals = [smooth(x, y, 0, 65535) for x in range(9)]
     odd += ' '.join(('00' + str(v)) if (x + y) % 5 == 0 else str(v) for x, v in enumerate(vals)) + ('  # row %d\r\n' % y if y == 2 else '\r\n')
 write('plain_odd16.pgm', odd.encode())
+
+# ---------- film and science ----------
+out = os.path.join(root, 'sci'); os.makedirs(out, exist_ok=True)
+
+def pack10(samples, methodB=False, pads=None):
+    words = []
+    for k in range(0, len(samples), 3):
+        s = (samples[k:k + 3] + [0, 0])[:3]
+        pad = pads(k // 3) if pads else 0
+        words.append((pad << 30) | (s[0] << 20) | (s[1] << 10) | s[2] if methodB else (s[0] << 22) | (s[1] << 12) | (s[2] << 2) | pad)
+    return words
+
+def v10(x, y, c): return smooth(x, y, c, 255) * 4 + (x + c) % 4
+
+# DPX: 10 bits (packing 1, big-endian; packing 2, little-endian with free
+# bits set), 8 bits with rows padded to 32 bits, 16 bits little-endian
+def dpx(name, be, w, h, desc, bits, packing, data):
+    e = '>' if be else '<'
+    head = bytearray(2048)
+    head[0:4] = b'SDPX' if be else b'XPDS'
+    struct.pack_into(e + 'I', head, 4, 2048); head[8:12] = b'V2.0'; struct.pack_into(e + 'I', head, 16, 2048 + len(data))
+    struct.pack_into(e + 'HHII', head, 768, 0, 1, w, h)
+    head[800] = desc; head[801] = 2; head[802] = 2; head[803] = bits
+    struct.pack_into(e + 'HHIII', head, 804, packing, 0, 2048, 0, 0)
+    write(name, bytes(head) + data)
+
+def dpx10(name, be, w, h, ch, desc, methodB, pads=None):
+    data = b''
+    for y in range(h):
+        ws = pack10([v10(x, y, c) for x in range(w) for c in range(ch)], methodB, pads)
+        data += b''.join(struct.pack('>I' if be else '<I', v) for v in ws)
+    dpx(name, be, w, h, desc, 10, 2 if methodB else 1, data)
+
+dpx10('dpx_10bit_rgb.dpx', True, 29, 17, 3, 50, False)
+dpx10('dpx_10bit_rgba_le.dpx', False, 23, 13, 4, 51, True, pads=lambda k: 3 if k % 17 == 0 else 0)
+w, h = 37, 15
+dpx('dpx_8bit_padded.dpx', True, w, h, 6, 8, 1, b''.join(bytes(smooth(x, y, 0, 255) for x in range(w)) + bytes(3) for y in range(h)))
+w, h = 21, 11
+dpx('dpx_16bit_le.dpx', False, w, h, 50, 16, 1, b''.join(b''.join(struct.pack('<H', smooth(x, y, c, 65535)) for x in range(w) for c in range(3)) + bytes(2) for y in range(h)))
+
+# Cineon: 10 bits three to a word, big-endian; 8 bits
+def cineon(name, w, h, bits, data):
+    head = bytearray(1024)
+    struct.pack_into('>IIIIII', head, 0, 0x802A5FD7, 1024, 1024, 0, 0, 1024 + len(data))
+    head[192] = 0; head[193] = 3
+    for k in range(3):
+        head[196 + 28 * k + 1] = k + 1; head[196 + 28 * k + 2] = bits
+        struct.pack_into('>II', head, 196 + 28 * k + 4, w, h)
+    head[680] = 0; head[681] = 5
+    write(name, bytes(head) + data)
+
+w, h = 31, 14
+cineon('cin_10bit.cin', w, h, 10, b''.join(struct.pack('>I', v) for y in range(h) for v in pack10([v10(x, y, c) for x in range(w) for c in range(3)])))
+w, h = 24, 10
+cineon('cin_8bit.cin', w, h, 8, b''.join(bytes(smooth(x, y, c, 255) for x in range(w) for c in range(3)) for y in range(h)))
+
+# FITS: 16-bit integers, three planes of bytes, floats
+def fits(name, cards, data):
+    head = b''.join(c.ljust(80).encode() for c in cards + ['END'])
+    head += b' ' * ((-len(head)) % 2880)
+    write(name, head + data + bytes((-len(data)) % 2880))
+card = lambda k, v: '%-8s= %20s' % (k, v)
+w, h = 33, 19
+fits('fits_16.fits', [card('SIMPLE', 'T'), card('BITPIX', 16), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h), card('BZERO', 32768)],
+     b''.join(struct.pack('>H', smooth(x, y, 0, 65535)) for y in range(h) for x in range(w)))
+w, h = 27, 16
+fits('fits_rgb.fits', [card('SIMPLE', 'T'), card('BITPIX', 8), card('NAXIS', 3), card('NAXIS1', w), card('NAXIS2', h), card('NAXIS3', 3)],
+     b''.join(bytes(smooth(x, y, c, 255) for x in range(w)) for c in range(3) for y in range(h)))
+w, h = 19, 12
+fits('fits_float.fits', [card('SIMPLE', 'T'), card('BITPIX', -32), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h)],
+     b''.join(struct.pack('>f', smooth(x, y, 0, 1000) / 7.0) for y in range(h) for x in range(w)))
+
+# VICAR: bytes in records longer than a row, a binary header line; HALF
+# bands one after the other
+def vicar(name, label, recsize, body, nlb=0):
+    lbl = len(label) + 16
+    lbl = (lbl + recsize - 1) // recsize * recsize
+    text = ('LBLSIZE=%d ' % lbl + label).ljust(lbl).encode()
+    write(name, text + bytes(nlb * recsize) + body)
+w, h = 30, 18
+vicar('vicar_byte.img', "FORMAT='BYTE' TYPE='IMAGE' ORG='BSQ' NL=%d NS=%d NB=1 NBB=0 NLB=1 RECSIZE=%d" % (h, w, w + 4), w + 4,
+      b''.join(bytes(smooth(x, y, 0, 255) for x in range(w)) + b'\0\0\0\0' for y in range(h)), nlb=1)
+w, h = 22, 13
+vicar('vicar_half3.img', "FORMAT='HALF' TYPE='IMAGE' ORG='BSQ' NL=%d NS=%d NB=3 NBB=0 NLB=0 RECSIZE=%d INTFMT='HIGH'" % (h, w, 2 * w), 2 * w,
+      b''.join(struct.pack('>H', smooth(x, y, c, 4095)) for c in range(3) for y in range(h) for x in range(w)))
+
+# DICOM: implicit little-endian without a preamble, a sequence of
+# undefined length before the pixels; explicit with a preamble, RGB planes
+def el_i(g, e, v): return struct.pack('<HHI', g, e, len(v)) + v
+def el_e(g, e, vr, v):
+    if vr in (b'OB', b'OW', b'SQ', b'UN', b'UT'): return struct.pack('<HH', g, e) + vr + b'\0\0' + struct.pack('<I', len(v)) + v
+    return struct.pack('<HH', g, e) + vr + struct.pack('<H', len(v)) + v
+w, h = 26, 20
+px = b''.join(struct.pack('<H', smooth(x, y, 0, 4095)) for y in range(h) for x in range(w))
+seq = struct.pack('<HHI', 0x0008, 0x1140, 0xFFFFFFFF) + struct.pack('<HHI', 0xFFFE, 0xE000, 0xFFFFFFFF) \
+      + el_i(0x0008, 0x1150, b'1.2.3\0') + struct.pack('<HHI', 0xFFFE, 0xE00D, 0) + struct.pack('<HHI', 0xFFFE, 0xE0DD, 0)
+write('dicom_implicit.dcm', el_i(0x0008, 0x0005, b'ISO_IR 100') + seq + el_i(0x0028, 0x0002, struct.pack('<H', 1))
+      + el_i(0x0028, 0x0010, struct.pack('<H', h)) + el_i(0x0028, 0x0011, struct.pack('<H', w))
+      + el_i(0x0028, 0x0100, struct.pack('<H', 16)) + el_i(0x7FE0, 0x0010, px))
+w, h = 18, 12
+ts = b'1.2.840.10008.1.2.1\0'
+meta = el_e(0x0002, 0x0010, b'UI', ts)
+px = b''.join(bytes(smooth(x, y, c, 255) for y in range(h) for x in range(w)) for c in range(3))
+write('dicom_rgb_planes.dcm', bytes(128) + b'DICM' + el_e(0x0002, 0x0000, b'UL', struct.pack('<I', len(meta))) + meta
+      + el_e(0x0028, 0x0002, b'US', struct.pack('<H', 3)) + el_e(0x0028, 0x0006, b'US', struct.pack('<H', 1))
+      + el_e(0x0028, 0x0010, b'US', struct.pack('<H', h)) + el_e(0x0028, 0x0011, b'US', struct.pack('<H', w))
+      + el_e(0x0028, 0x0100, b'US', struct.pack('<H', 8)) + el_e(0x7FE0, 0x0010, b'OB', px))
+
+# OpenEXR, one part, scanlines, uncompressed: halves (y from 5), floats
+def exr(name, names, ptype, w, h, ymin, val):
+    def attr(n, t, v): return n.encode() + b'\0' + t.encode() + b'\0' + struct.pack('<I', len(v)) + v
+    chl = b''.join(c.encode() + b'\0' + struct.pack('<iBBBBii', ptype, 0, 0, 0, 0, 1, 1) for c in names) + b'\0'
+    head = b'\x76\x2f\x31\x01' + struct.pack('<I', 2)
+    head += attr('channels', 'chlist', chl) + attr('compression', 'compression', b'\0')
+    head += attr('dataWindow', 'box2i', struct.pack('<4i', 0, ymin, w - 1, ymin + h - 1))
+    head += attr('displayWindow', 'box2i', struct.pack('<4i', 0, ymin, w - 1, ymin + h - 1))
+    head += attr('lineOrder', 'lineOrder', b'\0') + attr('pixelAspectRatio', 'float', struct.pack('<f', 1.0))
+    head += attr('screenWindowCenter', 'v2f', struct.pack('<2f', 0, 0)) + attr('screenWindowWidth', 'float', struct.pack('<f', 1.0)) + b'\0'
+    bs = 2 if ptype == 1 else 4
+    line = w * len(names) * bs
+    table = len(head) + 8 * h
+    offs = b''.join(struct.pack('<Q', table + y * (8 + line)) for y in range(h))
+    blocks = b''
+    for y in range(h):
+        blocks += struct.pack('<iI', ymin + y, line)
+        for c in range(len(names)):
+            for x in range(w):
+                v = val(x, y, c)
+                blocks += struct.pack('<e', v) if ptype == 1 else struct.pack('<f', v)
+    write(name, head + offs + blocks)
+exr('exr_half.exr', ['B', 'G', 'R'], 1, 25, 14, 5, lambda x, y, c: smooth(x, y, c, 255) / 64.0)
+exr('exr_float.exr', ['Y', 'Z'], 2, 16, 9, 0, lambda x, y, c: smooth(x, y, c, 1000) / 9.0)

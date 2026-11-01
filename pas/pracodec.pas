@@ -73,7 +73,7 @@ function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain, prasci;
 
 { ---------- byte sink and source ---------- }
 
@@ -757,6 +757,13 @@ begin
   if Result = psNotThis then Result := ParseVips(d, L);
   if Result = psNotThis then Result := ParseDds(d, L);
   if Result = psNotThis then Result := ParseViff(d, L);
+  if Result = psNotThis then Result := ParseDpx(d, L);
+  if Result = psNotThis then Result := ParseCineon(d, L);
+  if Result = psNotThis then Result := ParseFits(d, L);
+  if Result = psNotThis then Result := ParseVicar(d, L);
+  if Result = psNotThis then Result := ParseExr(d, L);
+  { DICOM: a magic after a 128-byte preamble, or (old files) none }
+  if Result = psNotThis then Result := ParseDicom(d, L);
   { no magic of their own: last, those whose fields say most first, those
     that have to fill the file (MTV, WBMP) before TGA }
   if Result = psNotThis then Result := ParseXwd(d, L);
@@ -795,6 +802,8 @@ begin
   if L.format = rfSUN then Result.rowBytes := (Result.rowBytes + 1) and not 1;
   { a BMP's run-length rows: padded to 4 bytes, as the run-length codes them }
   if L.coding = CODING_BMP_RLE then Result.rowBytes := (L.width * L.bits + 31) div 32 * 4;
+  { 10 bits packed: a row of words, three 16-bit samples each }
+  if L.coding = CODING_PACK10 then Result.rowBytes := Pack10Words(L.width, L.channels) * 6;
   Result.dataLength := Result.rowBytes * L.height;
 end;
 
@@ -803,12 +812,12 @@ end;
 function SideCoded(const L: TRasterLayout): Boolean;
 begin
   Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES,
-                         CODING_BMP_RLE, CODING_PLAIN];
+                         CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_EXR];
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
 function CodedScan(const d: TBytes; const L: TRasterLayout; out raw, side: TBytes): Boolean;
-var used: Int64; dec: TBytes; bpp, planes, bpl, lines: Integer; R: TRasterLayout;
+var used: Int64; dec: TBytes; bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean;
 begin
   raw := nil; side := nil; Result := False;
   R := RawLayout(L);
@@ -819,6 +828,15 @@ begin
                                          raw, side, used) = psOk;
     CODING_BMP_RLE: Result := BmpRleScan(d, L.dataOffset, L.width, L.height, L.bits, raw, side, used) = psOk;
     CODING_PLAIN: Result := PlainScan(d, L.dataOffset, R, raw, side, used) = psOk;
+    CODING_PACK10: begin
+      used := L.dataLength;
+      Result := Pack10Params(L.format, d, 0, L.dataOffset, methodB, wordsBE)
+        and Pack10Scan(d, L.dataOffset, L, methodB, wordsBE, raw, side);
+    end;
+    CODING_EXR: begin
+      used := L.dataLength;
+      Result := ExrScan(d, L.dataOffset, L, raw);
+    end;
     CODING_PLANES: begin
       used := R.dataLength;
       Result := L.dataOffset + used <= Length(d);
@@ -836,7 +854,7 @@ end;
 { the coded pixels again (hdr: the file's header, which PCX needs) }
 function CodedRebuild(const hdr: TBytes; hdrFirst: SizeInt; const raw, side: TBytes; const L: TRasterLayout;
                       out coded: TBytes): Boolean;
-var bpp, planes, bpl, lines: Integer; R: TRasterLayout;
+var bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64;
 begin
   coded := nil; Result := False;
   R := RawLayout(L);
@@ -847,6 +865,12 @@ begin
     CODING_SGI_RLE: Result := SgiRleRebuild(raw, side, L.width, L.height, L.channels, L.bits div 8, L.dataLength, coded);
     CODING_BMP_RLE: Result := BmpRleRebuild(raw, side, L.width, L.height, L.bits, L.dataLength, coded);
     CODING_PLAIN: Result := PlainRebuild(raw, side, R, L.dataLength, coded);
+    CODING_PACK10:
+      Result := Pack10Params(L.format, hdr, hdrFirst, Length(hdr) - hdrFirst, methodB, wordsBE)
+        and Pack10Rebuild(raw, side, L, methodB, wordsBE, coded) and (Length(coded) = L.dataLength);
+    CODING_EXR:
+      Result := ExrYMin(hdr, hdrFirst, Length(hdr) - hdrFirst, ymin) and ExrRebuild(raw, L.dataOffset, L, ymin, coded)
+        and (Length(coded) = L.dataLength);
     CODING_PLANES: begin
       coded := SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8);
       Result := Length(coded) = L.dataLength;
@@ -862,7 +886,7 @@ end;
 { the decoder, before anything is allocated: can the raw pixels be in
   dataLength coded bytes at all; and do they agree with the header }
 function CodedFits(const hdr: TBytes; hdrFirst: SizeInt; const L: TRasterLayout): Boolean;
-var bpp, planes, bpl, lines, w, ch, bits: Integer; R: TRasterLayout;
+var bpp, planes, bpl, lines, w, ch, bits: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64;
 begin
   R := RawLayout(L);
   case L.coding of
@@ -873,6 +897,10 @@ begin
     CODING_PLANES: Result := (L.bits in [8, 16]) and (L.dataLength = R.dataLength) and (R.dataLength <= MAX_RAW);
     CODING_BMP_RLE: Result := (L.channels = 1) and BmpRleFits(L.width, L.height, L.bits, L.dataLength);
     CODING_PLAIN: Result := PlainFits(L, L.dataLength);
+    CODING_PACK10: Result := (L.bits = 16) and Pack10Params(L.format, hdr, hdrFirst, Length(hdr) - hdrFirst, methodB, wordsBE)
+      and Pack10Fits(L, L.dataLength) and (L.dataLength = Pack10Words(L.width, L.channels) * 4 * L.height);
+    CODING_EXR: Result := ExrYMin(hdr, hdrFirst, Length(hdr) - hdrFirst, ymin) and ExrFits(L, L.dataLength)
+      and (L.dataLength = L.height * (16 + L.width * L.channels * (L.bits div 8)));
     CODING_PCX: begin
       { the pixels' layout has to be the one the header gives (PcxFromPixels
         reads them by it), and the decoded lines have to fit }
@@ -906,7 +934,7 @@ type
 function ReadStream(const s: TBytes; maxOut: Int64; out h: TStreamHead): TDecodeStatus;
 var
   src: TSource; hdrLen, run, y, rest, sideLen: Int64; flags, f, ver, m, k: Integer; Lp: TRasterLayout;
-  st: TParseStatus;
+  st: TParseStatus; stride: Int64;
 begin
   h.modes := nil; h.side := nil; h.mode := MODE_SAMPLES; h.L.Clear;
   h.bands := 0; h.bandFirst := nil; h.bandLen := nil;
@@ -921,7 +949,8 @@ begin
   if hdrLen > maxOut then Exit(dsTooBig);
   if not GetSection(src, ver, hdrLen, h.hdr) then Exit(dsBadStream);
   f := src.Get;
-  if (f <= Ord(Low(TRasterFormat))) or (f > Ord(rfDDS)) then Exit(dsBadStream);
+  if (f <= Ord(Low(TRasterFormat))) or (f > Ord(High(TRasterFormat)))
+     or (TRasterFormat(f) in [rfICO, rfCUR, rfDCX]) then Exit(dsBadStream);
   h.L.format := TRasterFormat(f);
   h.L.width := src.GetVarint(MAX_DIMENSION);
   h.L.height := src.GetVarint(MAX_DIMENSION);
@@ -941,9 +970,13 @@ begin
     rfVIFF: if h.L.channels > 1 then h.L.coding := CODING_PLANES;
     rfBMP: if (flags and 8) <> 0 then h.L.coding := CODING_BMP_RLE;
     rfPBM, rfPGM, rfPPM: if (flags and 8) <> 0 then h.L.coding := CODING_PLAIN;
+    rfDPX, rfCineon: if (flags and 8) <> 0 then h.L.coding := CODING_PACK10;
+    rfFITS, rfVICAR, rfDICOM: if (flags and 8) <> 0 then h.L.coding := CODING_PLANES;
+    rfEXR: h.L.coding := CODING_EXR;
   end;
   if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE,
-                                                   CODING_BMP_RLE, CODING_PLAIN]) then Exit(dsBadStream);
+                                                   CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10])
+     and not ((h.L.coding = CODING_PLANES) and (h.L.format in [rfFITS, rfVICAR, rfDICOM])) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
     { the coded length within the cap, the image within what that length
       can hold, and the coder's choices }
@@ -951,7 +984,12 @@ begin
     sideLen := src.GetVarint(Length(s));
     if not src.ok or (sideLen > Length(s) - src.p) then Exit(dsBadStream);
     if (h.L.width < 1) or (h.L.height < 1) or (h.L.width > MAX_DIMENSION) or (h.L.height > MAX_DIMENSION)
-       or (h.L.channels < 1) or (h.L.channels > 4) or not (h.L.bits in [1, 2, 4, 8, 16]) then Exit(dsBadStream);
+       or (h.L.channels < 1) then Exit(dsBadStream);
+    { what the codings make: EXR's lines of any channels, half or float;
+      the others up to 4 channels of 1 to 16 bits }
+    if h.L.coding = CODING_EXR then begin
+      if (h.L.channels > MAX_CHANNELS) or not (h.L.bits in [16, 32]) or (((flags and 2) <> 0) <> (h.L.bits = 32)) then Exit(dsBadStream);
+    end else if (h.L.channels > 4) or not (h.L.bits in [1, 2, 4, 8, 16]) then Exit(dsBadStream);
     if not CodedFits(h.hdr, 0, h.L) then Exit(dsBadStream);
     h.side := Copy(s, src.p, sideLen);
     Inc(src.p, sideLen);
@@ -989,7 +1027,8 @@ begin
     if h.L.dataLength > maxOut - hdrLen - h.tailLen then Exit(dsTooBig);
   end else begin
     { XWD's rows are as long as its header says }
-    if h.L.format = rfXWD then st := SizeRowsStride(h.L, maxOut - hdrLen - h.tailLen, XwdStride(h.hdr, 0, hdrLen))
+    stride := HeaderStride(h.L.format, h.hdr, 0, hdrLen);
+    if stride >= 0 then st := SizeRowsStride(h.L, maxOut - hdrLen - h.tailLen, stride)
     else st := SizeRows(h.L, maxOut - hdrLen - h.tailLen);
     case st of
       psOk: ;
@@ -1231,7 +1270,8 @@ begin
   if L.bigEndian then flags := flags or 1;
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
-  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN] then flags := flags or 8;
+  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10] then flags := flags or 8;
+  if (L.coding = CODING_PLANES) and (L.format in [rfFITS, rfVICAR, rfDICOM]) then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
   rgbe := nil; modes := nil; side := nil;

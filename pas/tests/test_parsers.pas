@@ -10,7 +10,7 @@
     test_parsers <tests/bmp> <tests/hdr> <tests/other> }
 program test_parsers;
 {$I ../pra.inc}
-uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, prarle, praparts, pracodec;
+uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, prarle, praparts, prasci, pracodec;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
@@ -110,11 +110,11 @@ begin
 end;
 
 var
-  dirB, dirH, dirO, dirM: string; parts: TParts; fmt: TRasterFormat; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
+  dirB, dirH, dirO, dirM, dirS: string; parts: TParts; fmt: TRasterFormat; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
   i, k, bad, oks, bpp, planes: Integer; samples: array of TBytes; hdrText: string; dd: TBytes;
 begin
   cells := 0; failures := 0; seed := 88172645;
-  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3); dirM := ParamStr(4);
+  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3); dirM := ParamStr(4); dirS := ParamStr(5);
 
   Writeln('BMP samples');
   d := ReadAll(dirB + '/graypal8.bmp'); st := ParseBmp(d, L);
@@ -441,6 +441,84 @@ begin
   end;
   Check(bad = 0, Format('8000 mutated files of several images: no exception, the parts cover them (%d split)', [oks]));
 
+  Writeln('film and science');
+  d := ReadAll(dirS + '/dpx_10bit_rgb.dpx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfDPX) and (L.coding = CODING_PACK10) and (L.channels = 3) and (L.bits = 16)
+    and (L.dataOffset = 2048) and (L.dataLength = Pack10Words(29, 3) * 4 * 17) and (L.rowBytes = Pack10Words(29, 3) * 6),
+    'dpx_10bit_rgb.dpx: 10 bits, three to a word');
+  d := ReadAll(dirS + '/dpx_10bit_rgba_le.dpx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_PACK10) and (L.channels = 4), 'dpx_10bit_rgba_le.dpx: packing 2, little-endian');
+  d := ReadAll(dirS + '/dpx_8bit_padded.dpx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_RAW) and (L.rowBytes = 40) and (HeaderStride(rfDPX, d, 0, 2048) = 40),
+    'dpx_8bit_padded.dpx: rows of 37 bytes in 40');
+  dd := Copy(d, 0, Length(d)); dd[770 + 1] := 2;
+  Check(ParseDpx(dd, L) = psUnsupported, 'DPX of two image elements: unsupported');
+  dd := Copy(d, 0, Length(d)); dd[800] := 99;
+  Check(ParseDpx(dd, L) = psUnsupported, 'DPX, a descriptor of 99: unsupported');
+  Check(ParseDpx(Copy(d, 0, 900), L) = psTruncated, 'DPX cut after its header: truncated');
+  d := ReadAll(dirS + '/cin_10bit.cin'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfCineon) and (L.coding = CODING_PACK10) and (L.dataOffset = 1024),
+    'cin_10bit.cin: Cineon, 10 bits packed');
+  dd := Copy(d, 0, Length(d)); dd[196 + 28 + 2] := 8;
+  Check(ParseCineon(dd, L) = psUnsupported, 'Cineon, channels of 10 and 8 bits: unsupported');
+  d := ReadAll(dirS + '/fits_rgb.fits'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfFITS) and (L.coding = CODING_PLANES) and (L.channels = 3) and (L.dataOffset = 2880)
+    and L.bottomUp, 'fits_rgb.fits: three planes, after a block of cards');
+  d := ReadAll(dirS + '/fits_float.fits'); st := ParseAny(d, L);
+  Check((st = psOk) and L.isFloat and L.bigEndian and (L.dataOffset + L.dataLength < Length(d)),
+    'fits_float.fits: 32-bit floats, padded to 2880');
+  d := ReadAll(dirS + '/fits_16.fits');
+  Check(ParseFits(Copy(d, 0, 2000), L) = psMalformed, 'FITS cut inside its first block: malformed');
+  dd := Copy(d, 0, Length(d)); for i := 80 * 6 to 80 * 7 - 1 do dd[i] := 32;
+  Check(ParseFits(dd, L) = psTruncated, 'FITS without END: truncated');
+  dd := Copy(d, 0, Length(d)); dd[80 + 29] := Ord('4'); dd[80 + 28] := Ord('6');
+  Check(ParseFits(dd, L) = psUnsupported, 'FITS of 64-bit integers: unsupported');
+  d := ReadAll(dirS + '/vicar_byte.img'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfVICAR) and (L.rowBytes = 34) and (L.dataOffset mod 34 = 0),
+    'vicar_byte.img: records of 34 bytes, a binary header line');
+  d := ReadAll(dirS + '/vicar_half3.img'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_PLANES) and (L.bits = 16) and L.bigEndian, 'vicar_half3.img: HALF, high first, three bands');
+  dd := Copy(d, 0, Length(d)); dd[8] := Ord('9');
+  Check(ParseVicar(dd, L) <> psOk, 'VICAR, a label size past the file: refused');
+  d := ReadAll(dirS + '/dicom_implicit.dcm'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfDICOM) and (L.bits = 16) and not L.bigEndian and (L.dataOffset + L.dataLength = Length(d)),
+    'dicom_implicit.dcm: no preamble, implicit VR, a sequence of undefined length');
+  d := ReadAll(dirS + '/dicom_rgb_planes.dcm'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_PLANES) and (L.channels = 3) and (L.bits = 8), 'dicom_rgb_planes.dcm: preamble, RGB in planes');
+  dd := Copy(d, 0, Length(d)); SetLength(dd, Length(d) - 10);
+  Check(ParseDicom(dd, L) <> psOk, 'DICOM, pixel data shorter than its image: refused');
+  d := ReadAll(dirS + '/exr_half.exr'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfEXR) and (L.coding = CODING_EXR) and (L.channels = 3) and (L.bits = 16),
+    'exr_half.exr: scanlines of halves');
+  d := ReadAll(dirS + '/exr_float.exr'); st := ParseAny(d, L);
+  Check((st = psOk) and L.isFloat and (L.channels = 2), 'exr_float.exr: two channels of floats');
+  i := Length(d) - 25 * 0 - 9 * (8 + 16 * 2 * 4);
+  dd := Copy(d, 0, Length(d)); dd[i + 4] := dd[i + 4] xor 1;
+  Check(ParseExr(dd, L) = psUnsupported, 'EXR, a line offset not where the line is: unsupported');
+
+  { mutated, anywhere in the first 1024 bytes: DPX's and EXR's fields are deep }
+  samples := nil; SetLength(samples, 6);
+  samples[0] := ReadAll(dirS + '/dpx_10bit_rgba_le.dpx'); samples[1] := ReadAll(dirS + '/cin_10bit.cin');
+  samples[2] := ReadAll(dirS + '/dicom_implicit.dcm'); samples[3] := ReadAll(dirS + '/exr_half.exr');
+  samples[4] := ReadAll(dirS + '/vicar_half3.img'); samples[5] := ReadAll(dirS + '/fits_rgb.fits');
+  bad := 0; oks := 0;
+  for i := 1 to 12000 do begin
+    d := Copy(samples[i mod 6], 0, Length(samples[i mod 6]));
+    if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
+    for k := 1 to 1 + Integer(Rand mod 3) do
+      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 1024)))] := Byte(Rand);
+    try
+      st := ParseAny(d, L);
+      if st = psOk then begin
+        Inc(oks);
+        if (L.dataOffset < 2) or (L.dataLength < 1) or (L.dataOffset + L.dataLength > Length(d)) then Inc(bad);
+      end;
+    except
+      Inc(bad);
+    end;
+  end;
+  Check(bad = 0, Format('12000 mutated DPX, Cineon, DICOM, EXR, VICAR, FITS: no exception, pixels inside (%d ok)', [oks]));
+
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
   Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
@@ -488,5 +566,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 151) then Halt(1);
+  if (failures > 0) or (cells < 173) then Halt(1);
 end.
