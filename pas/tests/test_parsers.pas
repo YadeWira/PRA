@@ -10,7 +10,7 @@
     test_parsers <tests/bmp> <tests/hdr> <tests/other> }
 program test_parsers;
 {$I ../pra.inc}
-uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, prarle, pracodec;
+uses SysUtils, Classes, Math, praraster, prabmp, prahdr, praother, prarle, praparts, pracodec;
 
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
@@ -72,6 +72,36 @@ begin
   Check(st = want, what + ': ' + StatusName(st));
 end;
 
+{ ParseAny, then the parts of a file of several images }
+function Split(const d: TBytes; out parts: TParts; out fmt: TRasterFormat): Boolean;
+var L: TRasterLayout; st: TParseStatus;
+begin
+  st := ParseAny(d, L);
+  Result := SplitFile(d, st, L, parts, fmt);
+end;
+
+{ the parts one after the other, the whole file, each image inside its
+  part (all bytes, when no entry is an image: the encoder then refuses) }
+function Covers(const d: TBytes; const parts: TParts): Boolean;
+var k: Integer; p: Int64;
+begin
+  p := 0;
+  for k := 0 to High(parts) do begin
+    if (parts[k].first <> p) or (parts[k].len < 1) then Exit(False);
+    if (parts[k].kind = pkImage) and ((parts[k].L.dataOffset < 0) or (parts[k].L.dataLength < 1)
+       or (parts[k].L.dataOffset + parts[k].L.dataLength > parts[k].len)) then Exit(False);
+    Inc(p, parts[k].len);
+  end;
+  Result := (Length(parts) >= 1) and (p = Length(d));
+end;
+
+function Kinds(const parts: TParts): string;
+var k: Integer;
+begin
+  Result := '';
+  for k := 0 to High(parts) do if parts[k].kind = pkImage then Result := Result + 'i' else Result := Result + 'b';
+end;
+
 function AllModes(const modes: TBytes; m: Byte): Boolean;
 var i: Integer;
 begin
@@ -80,11 +110,11 @@ begin
 end;
 
 var
-  dirB, dirH, dirO: string; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
+  dirB, dirH, dirO, dirM: string; parts: TParts; fmt: TRasterFormat; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
   i, k, bad, oks, bpp, planes: Integer; samples: array of TBytes; hdrText: string; dd: TBytes;
 begin
   cells := 0; failures := 0; seed := 88172645;
-  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3);
+  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3); dirM := ParamStr(4);
 
   Writeln('BMP samples');
   d := ReadAll(dirB + '/graypal8.bmp'); st := ParseBmp(d, L);
@@ -341,6 +371,60 @@ begin
   Check(ParseDds(WithU32(WithU32(d, 80, 4), 84, $31545844), L) = psUnsupported, 'DDS, DXT1: unsupported');
   Check(ParseDds(WithU32(d, 4, 100), L) = psMalformed, 'DDS, a header of 100 bytes: malformed');
 
+  Writeln('several images a file');
+  d := ReadAll(dirM + '/ico_three.ico');
+  Check(Split(d, parts, fmt) and (fmt = rfICO) and Covers(d, parts) and (Kinds(parts) = 'biiiib')
+    and (parts[1].L.bits = 4) and (parts[1].L.dataOffset = 40 + 64) and (parts[2].L.bits = 1)
+    and (parts[3].L.channels = 4) and (parts[3].L.height = 24),
+    'ico_three.ico: directory, 4-bit and mask, 32-bit and mask, the PNG');
+  Check(not Split(WithU32(d, 6 + 16 + 12, Length(d)), parts, fmt), 'ICO, an entry past the end: not split');
+  Check(not Split(WithU32(d, 6 + 16 + 12, 54 + 10), parts, fmt), 'ICO, two entries over each other: not split');
+  Check(not Split(WithU16(d, 4, 0), parts, fmt), 'ICO of no entries: not split');
+  Check(not Split(WithU16(d, 4, 60000), parts, fmt), 'ICO of 60000 entries in a few bytes: not split');
+  dd := WithU32(d, 54, 41);
+  Check(Split(dd, parts, fmt) and Covers(dd, parts) and (Kinds(parts) = 'biib'),
+    'ICO, a DIB header of 41 bytes: that entry kept as bytes');
+  d := ReadAll(dirM + '/cur_core.cur');
+  Check(Split(d, parts, fmt) and (fmt = rfCUR) and Covers(d, parts) and (Kinds(parts) = 'bii')
+    and (parts[1].L.dataOffset = 12 + 6), 'cur_core.cur: OS/2''s 12-byte header, 3-byte colours');
+  d := ReadAll(dirM + '/dcx_two.dcx');
+  Check(Split(d, parts, fmt) and (fmt = rfDCX) and Covers(d, parts) and (Kinds(parts) = 'bii')
+    and (parts[2].L.channels = 3) and (parts[2].L.coding = CODING_PCX), 'dcx_two.dcx: the table, two PCX');
+  Check(not Split(WithU32(d, 8, 4000), parts, fmt), 'DCX, offsets going back: not split');
+  Check(not Split(WithU32(d, 8, Length(d) + 1), parts, fmt), 'DCX, an offset past the end: not split');
+  dd := WithU32(d, 4, 4); dd := WithU32(dd, 8, 0);
+  Check(not Split(dd, parts, fmt), 'DCX, an offset inside its own table: not split');
+  d := ReadAll(dirM + '/pnm_three.pgm');
+  Check(Split(d, parts, fmt) and (fmt = rfPGM) and Covers(d, parts) and (Kinds(parts) = 'iiib')
+    and (parts[1].L.format = rfPPM) and (parts[2].L.format = rfPBM) and (parts[3].len = 1),
+    'pnm_three.pgm: PGM, PPM, PBM, a byte');
+  Check(not Split(ReadAll(dirO + '/../pnm/gray8.pgm'), parts, fmt), 'one PGM: not split');
+  d := ReadAll(dirM + '/dds_cube_mips.dds');
+  Check(Split(d, parts, fmt) and (fmt = rfDDS) and Covers(d, parts) and (Kinds(parts) = 'iiiiiiii')
+    and (parts[1].L.width = 4) and (parts[3].L.width = 1) and (parts[4].L.width = 8) and (parts[4].L.dataOffset = 0),
+    'dds_cube_mips.dds: two faces of four levels');
+  Check(not Split(ReadAll(dirO + '/dds_bgra32.dds'), parts, fmt), 'a DDS without mipmaps: not split');
+  { mutated: never an exception, and the parts always cover the file }
+  samples := nil; SetLength(samples, 4);
+  samples[0] := ReadAll(dirM + '/ico_three.ico'); samples[1] := ReadAll(dirM + '/dcx_two.dcx');
+  samples[2] := ReadAll(dirM + '/dds_cube_mips.dds'); samples[3] := ReadAll(dirM + '/cur_core.cur');
+  bad := 0; oks := 0;
+  for i := 1 to 8000 do begin
+    d := Copy(samples[i mod 4], 0, Length(samples[i mod 4]));
+    if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
+    for k := 1 to 1 + Integer(Rand mod 3) do
+      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 140)))] := Byte(Rand);
+    try
+      if Split(d, parts, fmt) then begin
+        Inc(oks);
+        if not Covers(d, parts) then Inc(bad);
+      end;
+    except
+      Inc(bad);
+    end;
+  end;
+  Check(bad = 0, Format('8000 mutated files of several images: no exception, the parts cover them (%d split)', [oks]));
+
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
   Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
@@ -386,5 +470,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 11 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 125) then Halt(1);
+  if (failures > 0) or (cells < 145) then Halt(1);
 end.

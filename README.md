@@ -20,7 +20,8 @@ first, and `x` checks the size and the BLAKE3 hash the `.pra` carries.
 Today PRA takes binary PBM, PGM, PPM, PAM and PFM, BMP (uncompressed and
 bitfields, 1 to 32 bits), Radiance HDR, TGA, PCX, SGI, Sun Raster (each
 raw and run-length, given back byte for byte whoever wrote it), farbfeld,
-WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS; see
+WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS, and files of several
+images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,
@@ -40,7 +41,8 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | more formats | | [the list](doc/FORMATS.md) |
 | model (counters, mixers, APM) | `pas/pramodel.pas` | first version |
 | header and tail model | `pas/prabytes.pas` | first version |
-| codec stream (version 2) | `pas/pracodec.pas` | first version |
+| several images a file (ICO, CUR, DCX, Netpbm, DDS) | `pas/praparts.pas` | done |
+| codec stream (versions 2 and 3) | `pas/pracodec.pas` | first version |
 | container (`.pra`) | `pas/praformat.pas`, `pas/prapack.pas`, `pas/prafs.pas` | done ([doc/FORMAT.md](doc/FORMAT.md)) |
 | command line (`pra`) | `pas/pracli.pas` | done ([doc/CLI.md](doc/CLI.md)) |
 

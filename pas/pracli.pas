@@ -344,30 +344,31 @@ end;
 
 { the extension of an image by its content, for a .pra that keeps none }
 function ExtensionOf(const d: TBytes): string;
-var L: TRasterLayout;
 begin
   Result := '.raw';
-  if ParseAny(d, L) = psOk then
-    case L.format of
-      rfPBM: Result := '.pbm';
-      rfPGM: Result := '.pgm';
-      rfPPM: Result := '.ppm';
-      rfPAM: Result := '.pam';
-      rfPFM: Result := '.pfm';
-      rfBMP: Result := '.bmp';
-      rfHDR: Result := '.hdr';
-      rfFarbfeld: Result := '.ff';
-      rfTGA: Result := '.tga';
-      rfSUN: Result := '.ras';
-      rfWBMP: Result := '.wbmp';
-      rfPCX: Result := '.pcx';
-      rfSGI: Result := '.sgi';
-      rfXWD: Result := '.xwd';
-      rfMTV: Result := '.mtv';
-      rfVIFF: Result := '.viff';
-      rfVIPS: Result := '.v';
-      rfDDS: Result := '.dds';
-    end;
+  case FileFormat(d) of
+    rfPBM: Result := '.pbm';
+    rfPGM: Result := '.pgm';
+    rfPPM: Result := '.ppm';
+    rfPAM: Result := '.pam';
+    rfPFM: Result := '.pfm';
+    rfBMP: Result := '.bmp';
+    rfHDR: Result := '.hdr';
+    rfFarbfeld: Result := '.ff';
+    rfTGA: Result := '.tga';
+    rfSUN: Result := '.ras';
+    rfWBMP: Result := '.wbmp';
+    rfPCX: Result := '.pcx';
+    rfSGI: Result := '.sgi';
+    rfXWD: Result := '.xwd';
+    rfMTV: Result := '.mtv';
+    rfVIFF: Result := '.viff';
+    rfVIPS: Result := '.v';
+    rfDDS: Result := '.dds';
+    rfICO: Result := '.ico';
+    rfCUR: Result := '.cur';
+    rfDCX: Result := '.dcx';
+  end;
 end;
 
 procedure ExtractOne(const f: string);

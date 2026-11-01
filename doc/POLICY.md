@@ -13,6 +13,7 @@ a file the writer accepts is a file the reader accepts.
 | `--max-output` | 256 MiB by default | The user's own cap on what `x` decodes. |
 | HDR image | 2^29 pixels | The RGBE is decoded whole into memory (2 GiB at most). And before it is allocated, the scanlines have to be long enough to hold it: a line takes at least 4 + 8 x ceil(W / 127) bytes (4 x W below 8 pixels), in the parser and in the decoder alike (`HdrFits`). |
 | `MAX_ROW_PAD` | 64 KiB | When the header says how long a row is (XWD's bytes_per_line), the bytes past its pixels: a few in real files (rows padded to 32 bits). More is malformed, and a 1 GiB row in a small file allocates nothing. |
+| parts of a file | 65,536 | How many images `praparts` cuts a file into (an ICO's entries are counted by a 16-bit number). The decoder needs no cap of its own: a part takes at least two bytes of the stream, and each part's length is checked against what is left of `--max-output` before it is decoded. |
 | `MAX_TEXT_HEADER` | 1 MiB | A header (Netpbm, HDR text, or a BMP's headers and palette up to its pixels) is a few dozen to a few thousand bytes; comments or a colour profile can make it bigger, but not this big. A header that does not end inside it is malformed. |
 
 ## What a parser promises

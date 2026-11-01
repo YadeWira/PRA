@@ -31,7 +31,9 @@ uses SysUtils;
 type
   { new formats go at the end: the stream keeps their number }
   TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR,
-    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX, rfSGI, rfXWD, rfMTV, rfVIFF, rfVIPS, rfDDS);
+    rfFarbfeld, rfTGA, rfSUN, rfWBMP, rfPCX, rfSGI, rfXWD, rfMTV, rfVIFF, rfVIPS, rfDDS,
+    { files of several images (praparts): never an image's format }
+    rfICO, rfCUR, rfDCX);
 
   TParseStatus = (
     psOk,
@@ -111,6 +113,9 @@ begin
     rfVIFF: Result := 'VIFF';
     rfVIPS: Result := 'VIPS';
     rfDDS: Result := 'DDS';
+    rfICO: Result := 'ICO';
+    rfCUR: Result := 'CUR';
+    rfDCX: Result := 'DCX';
   else Result := 'none';
   end;
 end;

@@ -24,14 +24,14 @@ work in place).
 | farbfeld | 16-bit RGBA raw | farbfeld 3 | **done** |
 | TGA | raw / RLE | tga 36, bloodLaceCompressedTGA 8 | **done** (raw and RLE; not the BloodLace variant) |
 | PCX | RLE | pcx 34 | **done** |
-| DCX | several PCX | dcx 11 | |
+| DCX | several PCX | dcx 11 | **done** |
 | SGI / RGB | raw / RLE, planar | sgi 16 | **done** |
 | Sun Raster | raw / RLE | sunRaster 12 | **done** |
-| ICO / CUR | DIB (reuses BMP) | ico 15, cur 15, icoOS2 12 | |
+| ICO / CUR | DIB (reuses BMP) | ico 15, cur 15, icoOS2 12 | **done**: DIB entries (colours and mask), PNG entries as bytes; not Windows 1.0's nor OS/2's own format |
 | WBMP | 1-bit raw | wirelessBMP 10 | **done** |
 | XWD | raw | xwd 11 | **done** (either byte order, rows as long as the header says) |
 | MTV, VIFF, VIPS | raw | mtv 11, viff 13, vips 1 | **done** (VIFF: one image, its bands as planes) |
-| DDS uncompressed | raw (BCn is separate) | dds 16, ddsMIPChain 15 | **done**: the main surface (a volume's slices too); mipmaps and a cube map's other faces stay in the tail until several images a file. DXT/BC: not raw pixels. ddsMIPChain holds headerless DXT chains, not DDS files |
+| DDS uncompressed | raw (BCn is separate) | dds 16, ddsMIPChain 15 | **done**: the main surface (a volume's slices too); mipmaps and a cube map's other faces as images of their own. DXT/BC: not raw pixels. ddsMIPChain holds headerless DXT chains, not DDS files |
 
 ## Batch 2: film and science, high bit depth
 

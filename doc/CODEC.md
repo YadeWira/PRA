@@ -19,6 +19,7 @@ up and the caller stores the file as it is.
 | 2 | `praarith` | binary arithmetic coder (from PJA) |
 | 3 | `praraster`, `prapnm`, `prabmp`, `prahdr` | parsers: header, pixels, tail |
 | 4 | `pramodel` | counters, hashed tables, mixer, APM |
+| 3 | `praparts` | files of several images: where each image is |
 | 4 | `prabytes` | the bytes kept (header, tail): a small byte model |
 | 5 | `pracodec` | the stream: layout, header, tail, pixels |
 
@@ -47,6 +48,29 @@ section     length (varint); when not 0, then 1 B: 0 the bytes as they are,
 
 Version 1 kept both sections as they are (length, then the bytes, no
 method byte); the decoder still reads it.
+
+## Stream of parts, version 3
+
+A file of several images (ICO, CUR, DCX, Netpbm images in a row, a DDS
+file's mipmaps and cube faces: `praparts`) is cut into parts, one after the
+other; the file is the parts joined.
+
+```
+version     1 B     3
+parts       how many (varint), then each:
+  kind      1 B: 0 bytes, 1 image
+  bytes:    a section (as above)
+  image:    its length in the file (varint), its stream's length (varint),
+            then its stream: version 2, as if the image were a file
+```
+
+An image whose stream is not smaller than it (a 2 x 2 mipmap) is coded as
+bytes instead, and bytes next to bytes are one part. If no image is left,
+a file that is one image with the rest as its tail is coded so. The
+decoder checks each part's length against the cap before decoding it; a
+part's image stream is never itself a stream of parts. The encoder has
+checked each image and each section as it coded them; then it reads the
+frame back, the images taken from the original.
 
 **The bytes kept.** A section is coded with its own small model
 (`prabytes`), or kept as it is when that is not smaller. Headers are
@@ -292,6 +316,18 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: several images a file (stream version 3)
+
+ICO and CUR (a DIB's colours and its AND mask as two images, a PNG as
+bytes, OS/2's 12-byte DIB header too), DCX, Netpbm images in a row, DDS
+mipmaps and cube faces. Corpus: abydos.ico 9.7% (xz: 18.3%), abydos.dcx
+16.6%, title.dds 66,113 -> 26,956 (its mipmaps were its tail),
+BMAP_3684.pbm (two images) 4.4%. favicon.ico 11,758 against xz's 10,004:
+image by image PRA and xz are even, but its 128 x 128 RGBA icon (flat
+areas, the same runs again) is 6,369 against 5,644: the pixel model has no
+match model yet. Not taken: Windows 1.0 icons and cursors, OS/2's own
+icon format (BA, IC, CI), an ICO of PNG entries only (nothing to model).
 
 ### 01/11/2026: XWD, MTV, VIFF, VIPS, uncompressed DDS
 

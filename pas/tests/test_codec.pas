@@ -228,6 +228,18 @@ begin
   Check(DecodeFile(s2, 1 shl 20, back) = dsFutureVersion, 'version ' + IntToStr(STREAM_VERSION + 1) + ': ' + DecodeStatusName(dsFutureVersion));
   s2[0] := 0;
   Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'version 0: damaged');
+  { a file of several images: the parts' frame }
+  for k := 0 to High(samples) do
+    if names[k] = 'ico_three.ico' then begin
+      Check(EncodeFile(samples[k], s, why) and (s[0] = 3), 'ico_three.ico: a stream of parts (version 3)');
+      Check(DecodeFile(s, Length(samples[k]) - 1, back) = dsTooBig, 'parts: a cap one byte below the file: refused');
+      s2 := Copy(s, 0, Length(s)); Inc(s2[1]);
+      Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'parts: one part more than there are: damaged');
+      s2 := Copy(s, 0, Length(s)); SetLength(s2, Length(s) + 1);
+      Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'parts: a byte after the last part: damaged');
+      s2 := Copy(s, 0, Length(s)); s2[2] := 7;
+      Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'parts: a part of kind 7: damaged');
+    end;
   { version 1 kept the header and the tail as they are: made by the code of
     then (f75c10f) from tests/other/tga_rgb24.tga, which has both }
   s2 := ReadAll('pas/tests/stream_v1_tga.bin');
@@ -283,5 +295,5 @@ begin
 
   Writeln('streams ', Hex(all.Final));
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 33) then Halt(1);
+  if (failures > 0) or (cells < 38) then Halt(1);
 end.

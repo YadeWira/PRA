@@ -35,9 +35,12 @@ interface
 uses SysUtils, praraster;
 
 const
-  { 2: the header and the tail coded (prabytes); 1: kept as they are. The
-    decoder reads both. }
-  STREAM_VERSION = 2;
+  { The first byte of a stream. An image: 2, its header and tail coded
+    (prabytes); 1, kept as they are. A file of several images: 3, its parts
+    (praparts). The decoder reads all three. }
+  IMAGE_STREAM = 2;
+  PARTS_STREAM = 3;
+  STREAM_VERSION = PARTS_STREAM;
   PRA_VERSION = '0.1.0';
 
 var
@@ -62,10 +65,15 @@ function DecodeStatusName(st: TDecodeStatus): string;
 
 { for the tests and tools: the parser that took the file }
 function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
+{ the file's format, of one image or of several (rfICO, rfCUR, rfDCX) }
+function FileFormat(const d: TBytes): TRasterFormat;
+{ the stream of one image whose layout is given (a part of a file of
+  several: praparts) }
+function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out why: string; threads: Integer = 1): Boolean;
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts;
 
 { ---------- byte sink and source ---------- }
 
@@ -149,12 +157,15 @@ end;
   kept, 1 B, and either the bytes or the coded bytes' length and those;
   whichever is smaller }
 procedure PutSection(var o: TSink; const d: TBytes; first, len: SizeInt);
-var c: TBytes;
+var c, back: TBytes;
 begin
   o.PutVarint(len);
   if len = 0 then Exit;
   c := PackBytes(d, first, len);
-  if VarintLength(Length(c)) + Length(c) < len then begin
+  { coded only if it comes back }
+  back := nil; SetLength(back, len);
+  if VarintLength(Length(c)) + Length(c) < len then UnpackBytes(c, 0, Length(c), back, 0, len);
+  if (VarintLength(Length(c)) + Length(c) < len) and CompareMem(@back[0], @d[first], len) then begin
     o.Put(SECTION_CODED); o.PutVarint(Length(c)); o.PutBytes(c, 0, Length(c));
   end else begin
     o.Put(SECTION_STORED); o.PutBytes(d, first, len);
@@ -895,13 +906,13 @@ begin
   src.b := s; src.p := 0; src.ok := True;
   ver := src.Get;
   if ver > STREAM_VERSION then Exit(dsFutureVersion);
-  if ver < 1 then Exit(dsBadStream);
+  if (ver < 1) or (ver > IMAGE_STREAM) then Exit(dsBadStream);
   hdrLen := src.GetVarint(MAX_TEXT_HEADER);
   if not src.ok then Exit(dsBadStream);
   if hdrLen > maxOut then Exit(dsTooBig);
   if not GetSection(src, ver, hdrLen, h.hdr) then Exit(dsBadStream);
   f := src.Get;
-  if (f <= Ord(Low(TRasterFormat))) or (f > Ord(High(TRasterFormat))) then Exit(dsBadStream);
+  if (f <= Ord(Low(TRasterFormat))) or (f > Ord(rfDDS)) then Exit(dsBadStream);
   h.L.format := TRasterFormat(f);
   h.L.width := src.GetVarint(MAX_DIMENSION);
   h.L.height := src.GetVarint(MAX_DIMENSION);
@@ -1189,19 +1200,17 @@ begin
   Result := (len = 0) or CompareMem(@a[aFirst], @b[bFirst], len);
 end;
 
-function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: Integer): Boolean;
+function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out why: string; threads: Integer): Boolean;
 var
-  L, Lp, Lt: TRasterLayout; st: TParseStatus; o: TSink; tailFirst, used, trialRows: Int64; flags: Byte;
+  Lp, Lt: TRasterLayout; o: TSink; tailFirst, used, trialRows: Int64; flags: Byte;
   px, rgbe, modes, side, prefix, lines, back: TBytes; y, run, m, k: Integer; at: SizeInt;
   h: TStreamHead; ok: Boolean; eb: TEncodeBands;
 begin
   s := nil; why := '';
-  st := ParseAny(d, L);
-  if st <> psOk then begin why := StatusName(st); Exit(False); end;
   if not Codable(L) then begin why := 'layout not handled by this version'; Exit(False); end;
   { everything before the pixels }
   o.Init;
-  o.Put(STREAM_VERSION);
+  o.Put(IMAGE_STREAM);
   PutSection(o, d, 0, L.dataOffset);
   o.Put(Ord(L.format));
   o.PutVarint(L.width); o.PutVarint(L.height); o.PutVarint(L.channels);
@@ -1301,10 +1310,131 @@ begin
   Result := True;
 end;
 
+{ ---------- files of several images ---------- }
+
+{ Version 3: the count of parts (varint), then each: its kind, 1 B (0
+  bytes, 1 image), and either a section (the bytes, prabytes) or the
+  image's length in the file (varint), its stream's length (varint) and
+  its stream (version 2). An image that cannot be coded becomes bytes. }
+const
+  PART_BYTES = 0;
+  PART_IMAGE = 1;
+
+type
+  PTBytes = ^TBytes;
+
+{ orig: the encoder's check of the frame, the images (each verified when
+  it was coded) taken from the original instead of decoded again }
+function DecodeParts(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer;
+                     orig: PTBytes = nil): TDecodeStatus;
+var src: TSource; n, k: SizeInt; len, slen, total: Int64; kind: Integer; part: TBytes; st: TDecodeStatus;
+begin
+  d := nil;
+  src.b := s; src.p := 1; src.ok := True;
+  { a part takes at least two bytes of the stream }
+  n := src.GetVarint(Length(s));
+  if not src.ok or (n < 1) then Exit(dsBadStream);
+  total := 0;
+  for k := 1 to n do begin
+    kind := src.Get;
+    len := src.GetVarint(High(Int64) shr 1);
+    if not src.ok or (kind > PART_IMAGE) then Exit(dsBadStream);
+    if len > maxOut - total then Exit(dsTooBig);
+    if kind = PART_BYTES then begin
+      if not GetSection(src, IMAGE_STREAM, len, part) then Exit(dsBadStream);
+    end else begin
+      slen := src.GetVarint(Length(s) - src.p);
+      if not src.ok or (slen < 1) or (s[src.p] = PARTS_STREAM) then Exit(dsBadStream);
+      if orig <> nil then begin
+        if total + len > Length(orig^) then Exit(dsBadStream);
+        part := Copy(orig^, total, len);
+      end else begin
+        st := DecodeFile(Copy(s, src.p, slen), len, part, threads);
+        if st <> dsOk then begin d := nil; Exit(st); end;
+      end;
+      if Length(part) <> len then begin d := nil; Exit(dsBadStream); end;
+      Inc(src.p, slen);
+    end;
+    { the parts joined: grown a part at a time, each within the cap }
+    SetLength(d, total + len);
+    if len > 0 then Move(part[0], d[total], len);
+    Inc(total, len);
+  end;
+  if src.p <> Length(s) then begin d := nil; Exit(dsBadStream); end;
+  Result := dsOk;
+end;
+
+function EncodeParts(const d: TBytes; const parts: TParts; out s: TBytes; out why: string; threads: Integer): Boolean;
+var
+  o: TSink; k, j, n, images: Integer; img, back: TBytes; w: string;
+  subs: array of TBytes; first, len: array of Int64;
+begin
+  { each image coded; one whose stream is not smaller than it (a mipmap of
+    a few pixels) becomes bytes, and bytes next to bytes are one part }
+  subs := nil; first := nil; len := nil; n := 0;
+  SetLength(subs, Length(parts)); SetLength(first, Length(parts)); SetLength(len, Length(parts));
+  for k := 0 to High(parts) do begin
+    subs[n] := nil;
+    if parts[k].kind = pkImage then begin
+      img := Copy(d, parts[k].first, parts[k].len);
+      if not EncodeImage(img, parts[k].L, subs[n], w, threads) or (Length(subs[n]) >= parts[k].len) then
+        subs[n] := nil;
+    end;
+    if (subs[n] = nil) and (n > 0) and (subs[n - 1] = nil) then Inc(len[n - 1], parts[k].len)
+    else begin first[n] := parts[k].first; len[n] := parts[k].len; Inc(n); end;
+  end;
+  images := 0;
+  o.Init;
+  o.Put(PARTS_STREAM);
+  o.PutVarint(n);
+  for j := 0 to n - 1 do
+    if subs[j] <> nil then begin
+      o.Put(PART_IMAGE);
+      o.PutVarint(len[j]);
+      o.PutVarint(Length(subs[j]));
+      o.PutBytes(subs[j], 0, Length(subs[j]));
+      Inc(images);
+    end else begin
+      o.Put(PART_BYTES);
+      PutSection(o, d, first[j], len[j]);
+    end;
+  if images = 0 then begin why := 'no image PRA codes in it'; Exit(False); end;
+  s := o.Done;
+  { each image came back already, each section too: what is left to check
+    is the parts' frame }
+  Result := (DecodeParts(s, Length(d), back, threads, @d) = dsOk) and (Length(back) = Length(d))
+    and ((Length(d) = 0) or CompareMem(@back[0], @d[0], Length(d)));
+  if not Result then begin s := nil; why := 'did not come back the same'; end;
+end;
+
+function FileFormat(const d: TBytes): TRasterFormat;
+var L: TRasterLayout; st: TParseStatus; parts: TParts; fmt: TRasterFormat;
+begin
+  st := ParseAny(d, L);
+  if SplitFile(d, st, L, parts, fmt) then Exit(fmt);
+  if st = psOk then Result := L.format else Result := rfNone;
+end;
+
+function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: Integer): Boolean;
+var L: TRasterLayout; st: TParseStatus; parts: TParts; fmt: TRasterFormat;
+begin
+  s := nil; why := '';
+  st := ParseAny(d, L);
+  { several images; if none of them is worth coding as one (a few pixels
+    each), the first one with the rest as its tail }
+  if SplitFile(d, st, L, parts, fmt) and EncodeParts(d, parts, s, why, threads) then Exit(True);
+  if st <> psOk then begin
+    if why = '' then why := StatusName(st);
+    Exit(False);
+  end;
+  Result := EncodeImage(d, L, s, why, threads);
+end;
+
 function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer): TDecodeStatus;
 var h: TStreamHead; rgbe, lines: TBytes; tailFirst: Int64; db: TDecodeBands; k: Integer;
 begin
   d := nil;
+  if (Length(s) > 0) and (s[0] = PARTS_STREAM) then Exit(DecodeParts(s, maxOut, d, threads));
   Result := ReadStream(s, maxOut, h);
   if Result <> dsOk then Exit;
   SetLength(d, h.L.dataOffset + h.L.dataLength + h.tailLen);

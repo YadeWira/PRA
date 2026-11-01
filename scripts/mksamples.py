@@ -403,3 +403,58 @@ dds('dds_volume.dds', 12, 8, 24, (0xFF0000, 0xFF00, 0xFF, 0), raster(12, 24, 3, 
 dds('dds_mips.dds', 16, 16, 32, (0xFF0000, 0xFF00, 0xFF, 0xFF000000),
     raster(16, 16, 4, 255, False) + raster(8, 8, 4, 255, False) + raster(4, 4, 4, 255, False)
     + raster(2, 2, 4, 255, False) + raster(1, 1, 4, 255, False), mips=5)
+
+# ---------- several images a file ----------
+out = os.path.join(root, 'multi'); os.makedirs(out, exist_ok=True)
+other = os.path.join(root, 'other')
+
+# ICO: a 4-bit palette entry, a 32-bit one, a PNG kept as it is; CUR with
+# OS/2's 12-byte DIB header
+def dib(w, h, bpp, rowfn, pal=b'', core=False):
+    rowbytes = ((w * bpp + 31) // 32) * 4
+    xor = b''.join(r + bytes(rowbytes - len(r)) for r in (rowfn(y) for y in range(h)))
+    mrow = ((w + 31) // 32) * 4
+    mask = b''.join(pack1([1 if (x - w // 2) ** 2 + (y - h // 2) ** 2 > (w // 2) ** 2 else 0 for x in range(w)]).ljust(mrow, b'\0') for y in range(h))
+    if core:
+        head = struct.pack('<IHHHH', 12, w, 2 * h, 1, bpp)
+    else:
+        head = struct.pack('<IiiHHIIiiII', 40, w, 2 * h, 1, bpp, 0, len(xor) + len(mask), 0, 0, len(pal) // 4, 0)
+    return head + pal + xor + mask
+
+def icondir(kind, entries, hot=(0, 0)):
+    head = struct.pack('<HHH', 0, kind, len(entries))
+    off = 6 + 16 * len(entries); dirs = b''; body = b''
+    for w, h, bpp, data in entries:
+        a, b = (1, bpp) if kind == 1 else hot
+        dirs += struct.pack('<BBBBHHII', w % 256, h % 256, 16 if bpp == 4 else 0, 0, a, b, len(data), off + len(body))
+        body += data
+    return head + dirs + body
+
+pal16 = b''.join(bytes([i * 16, 255 - i * 16, (i * 37) % 256, 0]) for i in range(16))
+e4 = dib(32, 32, 4, lambda y: pack4([((x // 4) + (y // 4)) % 16 for x in range(32)]), pal16)
+e32 = dib(24, 24, 32, lambda y: b''.join(bytes([smooth(x, y, 2, 255), smooth(x, y, 1, 255), smooth(x, y, 0, 255), 255 if x % 9 else 0]) for x in range(24)))
+png = b'\x89PNG\r\n\x1a\n' + bytes(rand() % 256 for _ in range(60))
+write('ico_three.ico', icondir(1, [(32, 32, 4, e4), (24, 24, 32, e32), (16, 16, 32, png)]))
+pal2 = b'\x00\x00\x00\xff\xff\xff'
+write('cur_core.cur', icondir(2, [(32, 32, 1, dib(32, 32, 1, lambda y: pack1([1 if (x * y) % 5 < 2 else 0 for x in range(32)]), pal2, core=True))], hot=(3, 4)))
+
+# DCX: two PCX files after the table
+p1 = open(os.path.join(other, 'pcx_pal8.pcx'), 'rb').read()
+p2 = open(os.path.join(other, 'pcx_rgb24.pcx'), 'rb').read()
+table = struct.pack('<I', 0x3ADE68B1) + struct.pack('<3I', 4 + 4 * 1024, 4 + 4 * 1024 + len(p1), 0) + bytes(4 * 1024 - 12)
+write('dcx_two.dcx', table + p1 + p2)
+
+# Netpbm: three images in a row, and a byte after them
+write('pnm_three.pgm', b'P5\n20 12\n255\n' + raster(20, 12, 1, 255, False) + b'P6\n16 10\n255\n' + raster(16, 10, 3, 255, False)
+      + b'P4\n13 7\n' + bytes(rand() % 256 for _ in range(14)) + b'\n')
+
+# DDS: a cube map of two faces with mipmaps, 32 bits
+def mipchain(w, h, ch):
+    out = b''
+    while True:
+        out += raster(w, h, ch, 255, False)
+        if w == 1 and h == 1: return out
+        w, h = max(1, w // 2), max(1, h // 2)
+head = b'DDS ' + struct.pack('<7I', 124, 0x2100F, 8, 8, 32, 0, 4) + bytes(44)
+head += struct.pack('<8I', 32, 0x41, 0, 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000) + struct.pack('<5I', 0x401008, 0x200 | 0x400 | 0x800, 0, 0, 0)
+write('dds_cube_mips.dds', head + mipchain(8, 8, 4) + mipchain(8, 8, 4))
