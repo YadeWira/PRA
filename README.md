@@ -4,7 +4,7 @@
 RLE-coded raster images (PNM, BMP, Radiance HDR and more), in FreePascal,
 with a C core where it pays and some x86-64 assembly; no libraries.
 
-The spiritual successor of [packPNM](https://github.com/YadeWira/packRAW):
+The spiritual successor of packPNM:
 written from scratch, with a codec and container of its own; it shares no
 code with packPNM and does not read its files.
 
@@ -27,6 +27,17 @@ and uncompressed OpenEXR; and containers: TIFF and BigTIFF (uncompressed
 and PackBits), PSD and PSB (layers too), IFF ILBM, PBM and ACBM, MIFF,
 GIMP's XCF; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
+
+PRA belongs to a family of recompressors that share that rule: the original
+comes back byte for byte, and nothing is written unless it verified.
+
+| Sibling | Formats | Successor of |
+|---|---|---|
+| [PMPA](https://github.com/YadeWira/PMPA) | MPEG audio (MP1, MP2, MP3) | [packMP3](https://github.com/YadeWira/packMP3), [packMP2](https://github.com/YadeWira/packMP2) |
+| **PRA** | raster images (PNM, BMP, HDR, TGA, PCX, ...) | packPNM |
+| [PPA](https://github.com/YadeWira/PPA) | the PNG family (PNG, APNG, MNG, JNG) | [packPNG](https://github.com/YadeWira/packPNG) |
+| [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
+| [PJA](https://github.com/YadeWira/PJA) | JPEG and JPEG-LS | [packJPG](https://github.com/YadeWira/packJPG) |
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,
 PRA's output is 11% smaller than packPNM's ([doc/CODEC.md](doc/CODEC.md)).
