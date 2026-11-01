@@ -26,7 +26,7 @@ unit pramodel;
 interface
 
 const
-  MAX_INPUTS = 12;
+  MAX_INPUTS = 16;
   MAX_LIMIT = 1023;
 
 type

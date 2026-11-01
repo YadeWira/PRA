@@ -35,12 +35,15 @@ interface
 uses SysUtils, praraster;
 
 const
-  { The first byte of a stream. An image: 2, its header and tail coded
-    (prabytes); 1, kept as they are. A file of several images: 3, its parts
-    (praparts). The decoder reads all three. }
-  IMAGE_STREAM = 2;
+  { The first byte of a stream. An image: 4, the pixel model with its
+    match models. A file of several images: 3, its parts (praparts), each
+    image a stream of version 4. Versions 1 and 2 (the model before the
+    match models; 1 kept the header and tail as they are) were never
+    released: their streams are refused. }
+  IMAGE_STREAM = 4;
   PARTS_STREAM = 3;
-  STREAM_VERSION = PARTS_STREAM;
+  OLD_IMAGE_STREAM = 2;
+  STREAM_VERSION = IMAGE_STREAM;
   PRA_VERSION = '0.1.0';
 
 var
@@ -238,11 +241,21 @@ type
     sel: Integer;                 { mx: the sub-channel }
     sel2: Integer;                { mx2 and the APM: the activity; -1: neither }
     apmCtx: Integer;
+    { the match model (CodeSamples): what the earlier occurrence of the
+      last samples predicts this sample's residual to be }
+    useMatch: Boolean;            { inputs to the mixer for them }
+    mTree: Boolean;               { the value is coded whole, by a tree of kbits (CodeIndices) }
+    kbits: Integer;
+    { two: after the last MATCH_LEN[0] samples, and after the last MATCH_LEN[1] }
+    mOn, mOk: array[0..1] of Boolean;   { an expectation for this sample; its bits still met }
+    mK, mM, mNeg, mLq: array[0..1] of Integer;
+    mc: array[0..1, 0..63] of TCounter;
     function Code(b, node, cls: Integer): Integer;
   end;
 
 function TPixelCoder.Code(b, node, cls: Integer): Integer;
-var i, p: Integer; nh, msk: Cardinal; tc: PCounter; c: array[0..N_MODELS - 1] of PCounter;
+var i, p, dep, kk, n0, z: Integer; e: array[0..1] of Integer; nh, msk: Cardinal; tc: PCounter;
+  c: array[0..N_MODELS - 1] of PCounter;
 begin
   { the counters straight from the table (the mask keeps them inside), their
     stretch into mx's inputs, which mx2 reads too }
@@ -251,8 +264,25 @@ begin
     c[i] := @tc[(hm[i] xor nh) and msk];
     mx.x[i] := STRETCH_T[c[i]^.p shr 4];
   end;
-  mx.x[nm] := 256;
-  mx.n := nm + 1;
+  n0 := nm;
+  e[0] := -1; e[1] := -1;
+  if useMatch then
+    for z := 0 to 1 do begin
+      { the bit a match expects at this node: on the length tree's path to
+        its length, then its mantissa and its sign while every bit met it }
+      if mOn[z] then
+        if mTree or (node < 64) then begin
+          dep := BitLen(node) - 1;
+          if ((mK[z] or (1 shl kbits)) shr (kbits - dep)) = node then e[z] := (mK[z] shr (kbits - 1 - dep)) and 1;
+        end else if node < 400 then begin
+          kk := (node - 64) shr 4;
+          if mOk[z] and (kk = mK[z]) then e[z] := (mM[z] shr (kk - 1 - ((node - 64) and 15))) and 1;
+        end else if mOk[z] then e[z] := mNeg[z];
+      if e[z] >= 0 then mx.x[n0] := STRETCH_T[mc[z, mLq[z] * 2 + e[z]].p shr 4] else mx.x[n0] := 0;
+      Inc(n0);
+    end;
+  mx.x[n0] := 256;
+  mx.n := n0 + 1;
   p := mx.Mix(cls + N_CLASSES * sel);
   if sel2 >= 0 then begin
     mx2.ext := @mx.x[0]; mx2.n := mx.n;
@@ -262,6 +292,11 @@ begin
   p := p shl 4;
   if encoding then enc.Encode(b, p) else b := dec.Decode(p);
   for i := 0 to nm - 1 do CounterUpdate(c[i]^, b, COUNTER_LIMIT);
+  for z := 0 to 1 do
+    if e[z] >= 0 then begin
+      CounterUpdate(mc[z, mLq[z] * 2 + e[z]], b, 255);
+      if b <> e[z] then mOk[z] := False;
+    end;
   if sel2 >= 0 then begin mx2.Update(b); apm.Update(b); end;
   mx.Update(b);
   Result := b;
@@ -416,6 +451,84 @@ var
   { INV_SQ[c] = 2^30 div c^2: a predictor's weight by its cost }
   INV_SQ: array[1..MAX_COST] of Integer;
 
+const
+  MATCH_LEN: array[0..1] of Integer = (2, 4);
+
+type
+  { The match models: every sample so far; where the last MATCH_LEN[z]
+    samples were last seen; the sample after them then, which may come
+    again. Two lengths, two expectations. }
+  TMatcher = record
+    hist: array of Word;
+    tab: array[0..1] of array of Integer;
+    hbits, pos: Integer;
+    mPtr, mLen: array[0..1] of Integer;
+    procedure Init(total: Int64);
+    { the expectations for the next sample into pc: the residual from pred
+      (modulo full), or (tree) the value itself }
+    procedure Expect(var pc: TPixelCoder; pred, half, full, B: Integer; tree: Boolean);
+    procedure Update(v: Integer);
+  end;
+
+{ the last n samples before pos }
+function MatchHash(const hist: array of Word; pos, n: Integer): Integer;
+var k: Integer; h: Cardinal;
+begin
+  h := Cardinal(n);
+  {$push}{$Q-}{$R-}
+  for k := pos - n to pos - 1 do h := (h + hist[k] + 1) * 2654435761;
+  {$pop}
+  Result := Integer(h shr 8);
+end;
+
+procedure TMatcher.Init(total: Int64);
+var z: Integer;
+begin
+  hist := nil; SetLength(hist, total);
+  hbits := BitLen(Integer(Min(total, 1 shl 30))) + 1;
+  if hbits < 12 then hbits := 12 else if hbits > 22 then hbits := 22;
+  for z := 0 to 1 do begin tab[z] := nil; SetLength(tab[z], 1 shl hbits); mPtr[z] := 0; mLen[z] := 0; end;
+  pos := 0;
+end;
+
+procedure TMatcher.Expect(var pc: TPixelCoder; pred, half, full, B: Integer; tree: Boolean);
+var z, rm: Integer;
+begin
+  pc.useMatch := True; pc.mTree := tree; pc.kbits := B;
+  for z := 0 to 1 do begin
+    pc.mOn[z] := mPtr[z] > 0;
+    if not pc.mOn[z] then Continue;
+    if tree then begin
+      pc.mK[z] := hist[mPtr[z]];
+      if pc.mK[z] >= full then pc.mOn[z] := False;
+    end else begin
+      rm := hist[mPtr[z]] - pred;
+      if rm >= half then rm := rm - full else if rm < -half then rm := rm + full;
+      pc.mM[z] := Abs(rm); pc.mK[z] := BitLen(pc.mM[z]); pc.mNeg[z] := Ord(rm < 0);
+      if pc.mK[z] >= B then pc.mOn[z] := False;
+    end;
+    pc.mLq[z] := Cap(mLen[z], 31);
+    pc.mOk[z] := True;
+  end;
+end;
+
+procedure TMatcher.Update(v: Integer);
+var z, hh: Integer;
+begin
+  hist[pos] := v;
+  Inc(pos);
+  for z := 0 to 1 do begin
+    if mPtr[z] > 0 then begin
+      if hist[mPtr[z]] = v then begin Inc(mLen[z]); Inc(mPtr[z]); end else begin mLen[z] := 0; mPtr[z] := 0; end;
+    end;
+    if pos >= MATCH_LEN[z] then begin
+      hh := MatchHash(hist, pos, MATCH_LEN[z]) and ((1 shl hbits) - 1);
+      if (mPtr[z] = 0) and (tab[z][hh] > 0) then begin mPtr[z] := tab[z][hh]; mLen[z] := 0; end;
+      tab[z][hh] := pos;
+    end;
+  end;
+end;
+
 procedure CodeSamples(var pc: TPixelCoder; var d: TBytes; const L: TRasterLayout);
 var
   P: TPlan;
@@ -428,6 +541,9 @@ var
   W_, N_, NW_, NE_, WW_, NN_, NNE_, eW, eN, eNW, eNE, act, qa, qc, dh, dv: Integer;
   rW, rN, rNW, i2, b0, cW, cN, cNW, cNE, cmin, tq, wq, sw, acc, dd: Integer;
   o: Int64;
+  { the match model: every sample so far, where the last MATCH_MIN were
+    last seen, the earlier sample that may come again }
+  mt: TMatcher; z: Integer;
 begin
   MakePlan(L, P);
   ns := P.nsub; w := P.cw;
@@ -438,6 +554,7 @@ begin
   for i := 0 to 1 do begin eP[i] := nil; SetLength(eP[i], w * ns * N_PRED * blend); end;
   half := 1 shl (P.B - 1); full := 1 shl P.B;
   pc.nm := N_MODELS;
+  mt.Init(Int64(w) * ns * L.height);
   for y := 0 to Integer(L.height) - 1 do begin
     cur := y mod 3; up := (y + 2) mod 3; up2 := (y + 1) mod 3;
     ecur := y mod 2; eup := (y + 1) mod 2;
@@ -537,9 +654,14 @@ begin
         pc.hm[7] := Hash4(10, s, (SBucket(NE_ - pred) + 16) or ((SBucket(W_ + N_ - NW_ - pred) + 16) shl 5), kref);
         pc.hm[8] := Hash4(7, s, W_, N_);
         pc.hm[9] := Hash4(8, s, Hash3(W_, NW_, N_), NE_);
-        pc.sel := Cap(s, MAX_SUB_SEL - 1);
+        { the sub-channel, and how long the longer match has held }
+        if mt.mPtr[1] = 0 then z := 0 else if mt.mLen[1] < 4 then z := 1 else if mt.mLen[1] < 16 then z := 2 else z := 3;
+        pc.sel := Cap(s, MAX_SUB_SEL - 1) + MAX_SUB_SEL * z;
         pc.sel2 := Cap(qa, 15) + 16 * Cap(BitLen(Abs(eW - eN)), 15);
         pc.apmCtx := Cap(qa, 15);
+        { the match's expectation: its sample's residual }
+        mt.Expect(pc, pred, half, full, P.B, False);
+        pc.kbits := P.kbits;
         { the residual, modulo 2^B, in [-half, half) }
         if pc.encoding then begin
           r := rows[cur][idx] - pred;
@@ -570,13 +692,15 @@ begin
         if v >= full then v := v - full else if v < 0 then v := v + full;
         rows[cur][idx] := v;
         errs[ecur][idx] := r;
+        { the match: kept up, or found again from the last MATCH_MIN samples }
+        mt.Update(v);
         if (blend <> 0) and (P.predRef[s] < 0) then
           for i2 := 0 to N_PRED - 1 do eP[ecur][idx * N_PRED + i2] := Abs(v - pr[i2]);
       end;
     if not pc.encoding then StoreRow(d, L, P, y, rows[cur]);
     { the row's padding bytes: one context a position, through a byte tree }
     if P.pad > 0 then begin
-      pc.nm := 1; pc.sel2 := -1; pc.sel := 0;
+      pc.nm := 1; pc.sel2 := -1; pc.sel := 0; pc.mOn[0] := False; pc.mOn[1] := False;
       o := L.dataOffset + Int64(y) * L.rowBytes + L.rowBytes - P.pad;
       for i := 0 to P.pad - 1 do begin
         pc.hm[0] := Hash2(77, i);
@@ -599,12 +723,13 @@ procedure CodeIndices(var pc: TPixelCoder; var d: TBytes; const L: TRasterLayout
 var
   P: TPlan;
   rows: array[0..2] of array of Integer;
-  cur, up, up2, y, x, w, j, t, v, W_, N_, NW_, NE_, WW_, NN_, flags: Integer;
+  cur, up, up2, y, x, w, j, t, v, W_, N_, NW_, NE_, WW_, NN_, flags: Integer; mt: TMatcher;
 begin
   MakePlan(L, P);
   w := P.cw;
   for x := 0 to 2 do begin rows[x] := nil; SetLength(rows[x], w); end;
   pc.nm := 8;
+  mt.Init(Int64(w) * L.height);
   for y := 0 to Integer(L.height) - 1 do begin
     cur := y mod 3; up := (y + 2) mod 3; up2 := (y + 1) mod 3;
     if pc.encoding then LoadRow(d, L, P, y, rows[cur]);
@@ -628,14 +753,16 @@ begin
       flags := Ord(W_ = N_) or (Ord(N_ = NE_) shl 1) or (Ord(W_ = NW_) shl 2) or (Ord(W_ = WW_) shl 3);
       pc.sel := 0; pc.sel2 := flags; pc.apmCtx := flags;
       if pc.encoding then v := rows[cur][x] else v := 0;
+      mt.Expect(pc, 0, 0, 1 shl P.B, P.B, True);
       t := 1;
       for j := P.B - 1 downto 0 do
         t := 2 * t + pc.Code((v shr j) and 1, t, Cap(P.B - 1 - j, 7) + 8 * (flags and 7));
       rows[cur][x] := t - (1 shl P.B);
+      mt.Update(rows[cur][x]);
     end;
     if not pc.encoding then StoreRow(d, L, P, y, rows[cur]);
   end;
-  pc.nm := N_MODELS;
+  pc.nm := N_MODELS; pc.useMatch := False;
 end;
 
 { ---------- 1-bit images ---------- }
@@ -689,7 +816,7 @@ end;
 { ---------- the pixels ---------- }
 
 procedure InitCoder(var pc: TPixelCoder; const L: TRasterLayout);
-var n: Int64; bits: Integer;
+var n: Int64; bits, i: Integer;
 begin
   n := L.width * L.height * L.channels;
   if L.bits = 32 then n := 2 * n;
@@ -698,10 +825,13 @@ begin
   if bits < TABLE_BITS_MIN then bits := TABLE_BITS_MIN;
   pc.t.Init(bits);
   pc.sel := 0; pc.sel2 := -1; pc.apmCtx := 0;
+  pc.useMatch := False; pc.mTree := False;
+  for i := 0 to 1 do begin pc.mOn[i] := False; pc.mOk[i] := False; end;
+  for i := 0 to 63 do begin CounterInit(pc.mc[0, i]); CounterInit(pc.mc[1, i]); end;
   if L.bits = 1 then pc.mx.Init(4, 32, MIXER_RATE)
   else begin
-    pc.mx.Init(N_MODELS + 1, N_CLASSES * MAX_SUB_SEL, MIXER_RATE);
-    pc.mx2.Init(N_MODELS + 1, N_CLASSES * N_SEL2, MIXER_RATE);
+    pc.mx.Init(N_MODELS + 3, N_CLASSES * MAX_SUB_SEL * 4, MIXER_RATE);
+    pc.mx2.Init(N_MODELS + 3, N_CLASSES * N_SEL2, MIXER_RATE);
     pc.apm.Init(N_CLASSES * 16, 6);
   end;
 end;
@@ -973,7 +1103,7 @@ begin
   src.b := s; src.p := 0; src.ok := True;
   ver := src.Get;
   if ver > STREAM_VERSION then Exit(dsFutureVersion);
-  if (ver < 1) or (ver > IMAGE_STREAM) then Exit(dsBadStream);
+  if ver <> IMAGE_STREAM then Exit(dsBadStream);
   hdrLen := src.GetVarint(MAX_TEXT_HEADER);
   if not src.ok then Exit(dsBadStream);
   if hdrLen > maxOut then Exit(dsTooBig);
@@ -1409,7 +1539,7 @@ end;
 { Version 3: the count of parts (varint), then each: its kind, 1 B (0
   bytes, 1 image, 2 a copy), and either a section (the bytes, prabytes),
   or the image's length in the file (varint), its stream's length (varint)
-  and its stream (version 2), or the copy's length and where in the file
+  and its stream (version 4), or the copy's length and where in the file
   its bytes were already (varints). An image that cannot be coded becomes
   bytes; a part the same as an earlier one, a copy (a PSD layer that is
   its composite). }

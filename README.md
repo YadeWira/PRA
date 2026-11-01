@@ -45,10 +45,10 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | farbfeld, TGA, Sun Raster, WBMP, PCX, SGI, XWD, MTV, VIFF, VIPS, DDS | `pas/praother.pas` | done |
 | run-length files, any writer | `pas/prarle.pas` | done (TGA, PCX, Sun Raster, SGI, BMP) |
 | more formats | | [the list](doc/FORMATS.md) |
-| model (counters, mixers, APM) | `pas/pramodel.pas` | first version |
+| model (counters, mixers, APM, match models) | `pas/pramodel.pas`, `pas/pracodec.pas` | second version |
 | header and tail model | `pas/prabytes.pas` | first version |
 | several images a file (ICO, CUR, DCX, Netpbm, DDS) | `pas/praparts.pas` | done |
-| codec stream (versions 2 and 3) | `pas/pracodec.pas` | first version |
+| codec stream (versions 3 and 4) | `pas/pracodec.pas` | first version |
 | container (`.pra`) | `pas/praformat.pas`, `pas/prapack.pas`, `pas/prafs.pas` | done ([doc/FORMAT.md](doc/FORMAT.md)) |
 | command line (`pra`) | `pas/pracli.pas` | done ([doc/CLI.md](doc/CLI.md)) |
 

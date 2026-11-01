@@ -251,16 +251,10 @@ begin
         if names[k2] = 'psd_raw.psd' then Check(Length(s) < Length(samples[k2]) div 2 + 200,
           'psd_dup.psd: the copies cost almost nothing');
     end;
-  { version 1 kept the header and the tail as they are: made by the code of
-    then (f75c10f) from tests/other/tga_rgb24.tga, which has both }
+  { version 1 (made by the code of f75c10f from tests/other/tga_rgb24.tga)
+    is of the model before the match models: refused, not misread }
   s2 := ReadAll('pas/tests/stream_v1_tga.bin');
-  for k := 0 to High(samples) do
-    if names[k] = 'tga_rgb24.tga' then begin
-      EncodeFile(samples[k], s, why);
-      Check((s2[0] = 1) and (DecodeFile(s2, 1 shl 20, back) = dsOk) and Same(back, samples[k])
-        and (Length(s) < Length(s2)), Format('a version 1 stream: decoded; version 2 codes its header and tail: %d -> %d',
-        [Length(s2), Length(s)]));
-    end;
+  Check((s2[0] = 1) and (DecodeFile(s2, 1 shl 20, back) = dsBadStream), 'a version 1 stream (an older model): refused');
   s2 := nil;
   Check(DecodeFile(s2, 1 shl 20, back) = dsEmpty, 'empty stream');
 
@@ -291,7 +285,7 @@ begin
   for i := 1 to 2000 do begin
     SetLength(dmg, 1 + Integer(Rand mod 60));
     for k := 0 to High(dmg) do dmg[k] := Byte(Rand);
-    dmg[0] := 1;
+    if Odd(i) then dmg[0] := STREAM_VERSION else dmg[0] := 3;   { images, and parts }
     try
       st := DecodeFile(dmg, 100000, back);
       if (st = dsOk) and (Length(back) > 100000) then Inc(bad);
@@ -299,7 +293,7 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, '2000 random streams with version 1: no exception');
+  Check(bad = 0, '2000 random streams of images and of parts: no exception');
 
   { the parser and the codec agree on what a PGM is }
   Check(ParseAny(samples[0], L) = psOk, 'ParseAny takes a PGM');

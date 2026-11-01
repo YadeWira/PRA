@@ -23,10 +23,10 @@ up and the caller stores the file as it is.
 | 4 | `prabytes` | the bytes kept (header, tail): a small byte model |
 | 5 | `pracodec` | the stream: layout, header, tail, pixels |
 
-## Stream, version 2
+## Stream, version 4
 
 ```
-version     1 B     1
+version     1 B     4
 header      a section: the bytes before the pixels
 layout      format 1 B, width, height, channels (varints), bits 1 B,
             flags 1 B (bit 0 big-endian, bit 1 float, bit 2 bottom-up,
@@ -47,8 +47,8 @@ section     length (varint); when not 0, then 1 B: 0 the bytes as they are,
             1 coded (prabytes): the coded length (varint), then those bytes
 ```
 
-Version 1 kept both sections as they are (length, then the bytes, no
-method byte); the decoder still reads it.
+Versions 1 and 2 (the model before the match models, never released) are
+refused: a stream of another model cannot be decoded by this one.
 
 ## Stream of parts, version 3
 
@@ -62,7 +62,7 @@ parts       how many (varint), then each:
   kind      1 B: 0 bytes, 1 image, 2 copy
   bytes:    a section (as above)
   image:    its length in the file (varint), its stream's length (varint),
-            then its stream: version 2, as if the image were a file
+            then its stream: version 4, as if the image were a file
   copy:     its length (varint), and where the same bytes are earlier in
             the file (varint)
 ```
@@ -139,10 +139,20 @@ the image): local activity and the blend's best cost; the neighbours' errors
 horizontal and vertical gradients; order 0; where W, N, NE and W+N-NW lie
 against the prediction; the exact values of W, N and of W, NW, N, NE.
 
-**Mixing.** Two mixers: one selected by the decision and the sub-channel,
-one by the decision and the local activity, averaged in the logistic
-domain, then an APM keyed by the decision and the activity (1/4 input,
-3/4 APM).
+**Match models.** Two: where the last 2 samples (in coding order) were
+last seen, and where the last 4 were; the sample that followed them then
+is expected again. Each gives, at every decision of the residual (its
+length's tree, its bits, its sign, while the coded bits still agree with
+it), the bit it expects, and a counter for (how long the match has held,
+the expected bit) gives the mixer an input; the longer match's state also
+selects the first mixer's weights. Indices take the same, on their value's
+tree. On the tuning sets: the photos 6.5% smaller (a 16-bit RGB image 25%),
+the synthetic images 5.5% (favicon.ico below xz); about a fifth slower.
+
+**Mixing.** Two mixers: one selected by the decision, the sub-channel and
+the match's state, one by the decision and the local activity, averaged in
+the logistic domain, then an APM keyed by the decision and the activity
+(1/4 input, 3/4 APM).
 
 **1-bit images.** Their own model: three templates of 10, 16 and 22
 neighbouring pixels, a mixer selected by the 5 nearest.
@@ -370,6 +380,31 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: match models (stream version 4)
+
+Tuning set (10 photos, 18 MB) and a synthetic set (18 icons, screen dumps,
+PCX, logos):
+
+| | photos | synthetic |
+|---|---|---|
+| before | 6,967,923 | 371,098 |
+| one match, after 8 samples | 6,907,881 | 365,393 |
+| one match, after 4 | 6,687,187 | 357,573 |
+| one match, after 2 | 6,619,685 | 358,792 |
+| two: after 2 and 8 | 6,601,862 | 356,353 |
+| two: after 2 and 4 | 6,517,524 | 352,162 |
+| two: after 2 and 3 | 6,516,367 | 353,075 |
+| (2, 4), the longer's state selecting mixer weights | 6,514,360 | 351,587 |
+| and the indices mode too | 6,514,360 | 350,731 |
+
+Short contexts win: a 'match' after 2 samples is the last time the same
+two samples came in a row, which in images is a strong guess. favicon.ico
+11,718 -> 9,997 (xz 10,004); cool.bmp 143,982 -> 129,746;
+lighthouse_rgb48.ppm 1,486,227 -> 1,068,110. Time: set1 27.8 s -> 33.8 s.
+1-bit images (their own model) are unchanged: fonts and fax pages next.
+The whole local corpus under 20 MB, every format: 497 files, 464 MB,
+27.49%, every one back byte for byte.
 
 ### 01/11/2026: containers (batch 3): TIFF, PSD, IFF
 
