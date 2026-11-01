@@ -14,7 +14,10 @@
   The pixel part is `height` rows of `rowBytes` bytes each; a row holds
   `width` pixels of `channels` samples of `bits` bits, interleaved, packed
   most significant bit first when bits < 8, and whatever is left over at the
-  end of the row (padding bits or bytes) is part of the row too. }
+  end of the row (padding bits or bytes) is part of the row too.
+
+  A Radiance HDR file's pixels are run-length coded: for it, dataLength is
+  the coded scanlines' length, and the codec decodes them (prahdr). }
 unit praraster;
 
 {$I pra.inc}
@@ -26,7 +29,8 @@ interface
 uses SysUtils;
 
 type
-  TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM);
+  { new formats go at the end: the stream keeps their number }
+  TRasterFormat = (rfNone, rfPBM, rfPGM, rfPPM, rfPAM, rfPFM, rfBMP, rfHDR);
 
   TParseStatus = (
     psOk,
@@ -76,6 +80,8 @@ begin
     rfPPM: Result := 'PPM';
     rfPAM: Result := 'PAM';
     rfPFM: Result := 'PFM';
+    rfBMP: Result := 'BMP';
+    rfHDR: Result := 'HDR';
   else Result := 'none';
   end;
 end;
@@ -98,7 +104,9 @@ begin
      or (L.channels < 1) or (L.channels > MAX_CHANNELS) then Exit(psMalformed);
   { width <= 2^24, channels <= 2^8, bits <= 32: at most 2^37, no overflow }
   bitsPerRow := L.width * L.channels * L.bits;
-  L.rowBytes := (bitsPerRow + 7) div 8;
+  { BMP rows are padded to a multiple of 4 bytes }
+  if L.format = rfBMP then L.rowBytes := ((bitsPerRow + 31) div 32) * 4
+  else L.rowBytes := (bitsPerRow + 7) div 8;
   if (available < L.rowBytes) or (L.height > available div L.rowBytes) then Exit(psTruncated);
   L.dataLength := L.rowBytes * L.height;
   Result := psOk;

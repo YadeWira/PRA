@@ -8,20 +8,19 @@ Sample counts refer to the local corpus
 (`/mnt/OSR_D3/fileFormatSamples/fileFormatSamples/image/<folder>`; copy, never
 work in place).
 
-## Base (inherited from packPNM)
+## Base (inherited from packPNM): done
 
-| Format | Pixels | Corpus folder (files) |
-|---|---|---|
-| PBM / PGM / PPM | raw | pbm 14, pgm 14, ppm 14 |
-| BMP | raw, RLE4/RLE8 | bmp 42 |
-| Radiance HDR | RGBE + RLE | radiance 10 |
+| Format | Pixels | Corpus folder (files) | Status |
+|---|---|---|---|
+| PBM / PGM / PPM | raw | pbm 14, pgm 14, ppm 14 | binary done; plain (P1-P3) not yet |
+| PAM, PFM | raw | pam 6, pfm 4 | done |
+| BMP | raw, bitfields; RLE4/RLE8 | bmp 42 | raw and bitfields done (1 to 32 bits, OS/2 too); RLE not yet |
+| Radiance HDR | RGBE + RLE | radiance 10 | done (Radiance's and stb's run-length coders, flat lines) |
 
 ## Batch 1: header + raw/RLE pixels
 
 | Format | Pixels | Corpus folder (files) |
 |---|---|---|
-| PAM (P7) | raw, alpha | pam 6 |
-| PFM | float32 raw | pfm 4 |
 | farbfeld | 16-bit RGBA raw | farbfeld 3 |
 | TGA | raw / RLE | tga 36, bloodLaceCompressedTGA 8 |
 | PCX / DCX | RLE | pcx 34, dcx 11 |

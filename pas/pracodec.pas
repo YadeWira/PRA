@@ -53,7 +53,7 @@ function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm;
+uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr;
 
 { ---------- byte sink and source ---------- }
 
@@ -127,6 +127,7 @@ const
   N_MODELS = 10;
   N_CLASSES = 66;              { mixer classes: tree nodes 1..31, mantissa 32..63, sign 65 }
   CLASS_SIGN = 65;
+  CLASS_PAD = 64;
   { the counter table: 2^(bit length of the sub-samples + 4), between 2^12
     and 2^22. Part of the format: the decoder computes it from the layout. }
   TABLE_BITS_MIN = 12;
@@ -191,6 +192,8 @@ type
     kbits: Integer;                   { bits of the bit-length tree }
     order: array of Integer;          { the order sub-channels are coded in }
     predRef, ctxRef: array of Integer;
+    cw: Integer;                      { pixels coded a row: the padding samples too, when there is one channel }
+    pad: Integer;                     { bytes after them in each row, coded on their own }
   end;
 
 procedure MakePlan(const L: TRasterLayout; out P: TPlan);
@@ -199,6 +202,14 @@ begin
   if L.bits = 32 then begin P.nsub := 2 * L.channels; P.B := 16; end
   else begin P.nsub := L.channels; P.B := L.bits; end;
   P.kbits := BitLen(P.B);
+  { one channel: every sample of the row, the padding ones too (they are
+    zeros, or whatever the writer left: either way they come back) }
+  if (L.channels = 1) and ((L.rowBytes * 8) mod L.bits = 0) then begin
+    P.cw := Integer((L.rowBytes * 8) div L.bits); P.pad := 0;
+  end else begin
+    P.cw := Integer(L.width);
+    P.pad := Integer(L.rowBytes - L.width * L.channels * (L.bits div 8));
+  end;
   P.order := nil; P.predRef := nil; P.ctxRef := nil;
   SetLength(P.order, P.nsub); SetLength(P.predRef, P.nsub); SetLength(P.ctxRef, P.nsub);
   for i := 0 to P.nsub - 1 do begin P.order[i] := i; P.predRef[i] := -1; P.ctxRef[i] := -1; end;
@@ -236,9 +247,10 @@ procedure LoadRow(const d: TBytes; const L: TRasterLayout; const P: TPlan; y: In
 var x, c: Integer; o: Int64; v: Cardinal;
 begin
   o := L.dataOffset + Int64(y) * L.rowBytes;
-  for x := 0 to Integer(L.width) - 1 do
+  for x := 0 to P.cw - 1 do
     for c := 0 to L.channels - 1 do begin
       case L.bits of
+        2, 4: row[x] := (d[o + (x * L.bits) shr 3] shr (8 - L.bits - (x * L.bits) and 7)) and ((1 shl L.bits) - 1);
         8: begin row[x * P.nsub + c] := d[o]; Inc(o); end;
         16: begin
           if L.bigEndian then row[x * P.nsub + c] := (d[o] shl 8) or d[o + 1]
@@ -261,9 +273,12 @@ procedure StoreRow(var d: TBytes; const L: TRasterLayout; const P: TPlan; y: Int
 var x, c: Integer; o: Int64; v: Cardinal;
 begin
   o := L.dataOffset + Int64(y) * L.rowBytes;
-  for x := 0 to Integer(L.width) - 1 do
+  for x := 0 to P.cw - 1 do
     for c := 0 to L.channels - 1 do begin
       case L.bits of
+        { the row's bytes start at zero (a fresh buffer): the samples are or'ed in }
+        2, 4: d[o + (x * L.bits) shr 3] := d[o + (x * L.bits) shr 3]
+                or (row[x] shl (8 - L.bits - (x * L.bits) and 7));
         8: begin d[o] := row[x * P.nsub + c]; Inc(o); end;
         16: begin
           if L.bigEndian then begin d[o] := row[x * P.nsub + c] shr 8; d[o + 1] := row[x * P.nsub + c] and 255; end
@@ -281,7 +296,7 @@ begin
         end;
       end;
     end;
-  { whatever the row has after its samples (none for these formats) is left as it is }
+  { the padding bytes after the samples are CodeSamples' own }
 end;
 
 function Med(a, b, c: Integer): Integer; inline;
@@ -323,9 +338,10 @@ var
   pred, r, v, ref, eref, kref, xr, blend: Integer;
   W_, N_, NW_, NE_, WW_, NN_, NNE_, eW, eN, eNW, eNE, act, qa, qc, dh, dv: Integer;
   rW, rN, rNW, i2, b0, cW, cN, cNW, cNE, cmin, tq, wq, sw, acc, dd: Integer;
+  o: Int64;
 begin
   MakePlan(L, P);
-  ns := P.nsub; w := Integer(L.width);
+  ns := P.nsub; w := P.cw;
   for i := 0 to 2 do begin rows[i] := nil; SetLength(rows[i], w * ns); end;
   for i := 0 to 1 do begin errs[i] := nil; SetLength(errs[i], w * ns); end;
   { blending: 8-bit samples without a reference channel (gray, and green) }
@@ -464,7 +480,68 @@ begin
           for i2 := 0 to N_PRED - 1 do eP[ecur][idx * N_PRED + i2] := Abs(v - pr[i2]);
       end;
     if not pc.encoding then StoreRow(d, L, P, y, rows[cur]);
+    { the row's padding bytes: one context a position, through a byte tree }
+    if P.pad > 0 then begin
+      pc.nm := 1; pc.sel2 := -1; pc.sel := 0;
+      o := L.dataOffset + Int64(y) * L.rowBytes + L.rowBytes - P.pad;
+      for i := 0 to P.pad - 1 do begin
+        pc.hm[0] := Hash2(77, i);
+        if pc.encoding then v := d[o + i] else v := 0;
+        t := 1;
+        for j := 7 downto 0 do t := 2 * t + pc.Code((v shr j) and 1, t, CLASS_PAD);
+        if not pc.encoding then d[o + i] := t - 256;
+      end;
+      pc.nm := N_MODELS;
+    end;
   end;
+end;
+
+{ ---------- indices ---------- }
+
+{ One channel of 2, 4 or 8 bits taken as symbols, not intensities (palette
+  indices, an image of a few gray levels): each value coded whole, by a
+  binary tree, in contexts of the exact neighbouring values. }
+procedure CodeIndices(var pc: TPixelCoder; var d: TBytes; const L: TRasterLayout);
+var
+  P: TPlan;
+  rows: array[0..2] of array of Integer;
+  cur, up, up2, y, x, w, j, t, v, W_, N_, NW_, NE_, WW_, NN_, flags: Integer;
+begin
+  MakePlan(L, P);
+  w := P.cw;
+  for x := 0 to 2 do begin rows[x] := nil; SetLength(rows[x], w); end;
+  pc.nm := 8;
+  for y := 0 to Integer(L.height) - 1 do begin
+    cur := y mod 3; up := (y + 2) mod 3; up2 := (y + 1) mod 3;
+    if pc.encoding then LoadRow(d, L, P, y, rows[cur]);
+    for x := 0 to w - 1 do begin
+      if x > 0 then W_ := rows[cur][x - 1] else W_ := 256;
+      if x > 1 then WW_ := rows[cur][x - 2] else WW_ := 256;
+      if y > 0 then begin
+        N_ := rows[up][x];
+        if x > 0 then NW_ := rows[up][x - 1] else NW_ := 256;
+        if x < w - 1 then NE_ := rows[up][x + 1] else NE_ := 256;
+        if y > 1 then NN_ := rows[up2][x] else NN_ := 256;
+      end else begin N_ := 256; NW_ := 256; NE_ := 256; NN_ := 256; end;
+      pc.hm[0] := Hash2(31, W_);
+      pc.hm[1] := Hash2(32, N_);
+      pc.hm[2] := Hash3(33, W_, N_);
+      pc.hm[3] := Hash4(34, W_, N_, NW_);
+      pc.hm[4] := Hash4(35, W_, N_, NE_);
+      pc.hm[5] := Hash4(36, Hash3(W_, WW_, NW_), N_, NE_);
+      pc.hm[6] := Hash4(37, N_, NN_, NE_);
+      pc.hm[7] := Hash2(38, 0);
+      flags := Ord(W_ = N_) or (Ord(N_ = NE_) shl 1) or (Ord(W_ = NW_) shl 2) or (Ord(W_ = WW_) shl 3);
+      pc.sel := 0; pc.sel2 := flags; pc.apmCtx := flags;
+      if pc.encoding then v := rows[cur][x] else v := 0;
+      t := 1;
+      for j := P.B - 1 downto 0 do
+        t := 2 * t + pc.Code((v shr j) and 1, t, Cap(P.B - 1 - j, 7) + 8 * (flags and 7));
+      rows[cur][x] := t - (1 shl P.B);
+    end;
+    if not pc.encoding then StoreRow(d, L, P, y, rows[cur]);
+  end;
+  pc.nm := N_MODELS;
 end;
 
 { ---------- 1-bit images ---------- }
@@ -535,24 +612,39 @@ begin
   end;
 end;
 
-function EncodePixels(const d: TBytes; const L: TRasterLayout): TBytes;
+const
+  MODE_SAMPLES = 0;     { predicted intensities }
+  MODE_INDICES = 1;     { symbols: CodeIndices }
+
+{ whether the layout gets a mode byte: one channel of 2 to 8 bits, which
+  may be intensities or palette indices }
+function HasMode(const L: TRasterLayout): Boolean;
+begin
+  Result := (L.channels = 1) and (L.bits >= 2) and (L.bits <= 8);
+end;
+
+function EncodePixels(const d: TBytes; const L: TRasterLayout; mode: Integer = MODE_SAMPLES): TBytes;
 var pc: TPixelCoder; dd: TBytes;
 begin
   pc.encoding := True;
   InitCoder(pc, L);
   pc.enc.Init;
   dd := d;
-  if L.bits = 1 then CodeBits(pc, dd, L) else CodeSamples(pc, dd, L);
+  if L.bits = 1 then CodeBits(pc, dd, L)
+  else if mode = MODE_INDICES then CodeIndices(pc, dd, L)
+  else CodeSamples(pc, dd, L);
   Result := pc.enc.Finish;
 end;
 
-procedure DecodePixels(const s: TBytes; first: SizeInt; var d: TBytes; const L: TRasterLayout);
+procedure DecodePixels(const s: TBytes; first: SizeInt; var d: TBytes; const L: TRasterLayout; mode: Integer = MODE_SAMPLES);
 var pc: TPixelCoder;
 begin
   pc.encoding := False;
   InitCoder(pc, L);
   pc.dec.Init(s, first);
-  if L.bits = 1 then CodeBits(pc, d, L) else CodeSamples(pc, d, L);
+  if L.bits = 1 then CodeBits(pc, d, L)
+  else if mode = MODE_INDICES then CodeIndices(pc, d, L)
+  else CodeSamples(pc, d, L);
 end;
 
 { ---------- the stream ---------- }
@@ -560,23 +652,34 @@ end;
 function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
 begin
   Result := ParsePnm(d, L);
+  if Result = psNotThis then Result := ParseBmp(d, L);
+  if Result = psNotThis then Result := ParseHdr(d, L);
 end;
 
 { the layouts this version can code }
 function Codable(const L: TRasterLayout): Boolean;
 begin
   case L.bits of
-    1: Result := L.channels = 1;
+    1, 2, 4: Result := L.channels = 1;
     8, 16: Result := not L.isFloat;
     32: Result := L.isFloat;
   else Result := False;
   end;
-  { every sample of a row, and nothing else, in rowBytes }
-  if Result and (L.bits >= 8) then Result := L.rowBytes = L.width * L.channels * (L.bits div 8);
+  { every sample of a row in rowBytes; what is left is padding }
+  if Result then Result := L.rowBytes * 8 >= L.width * L.channels * L.bits;
+end;
+
+{ an HDR file's pixels: the layout of its decoded RGBE, as an image of its own }
+function RgbeLayout(const L: TRasterLayout): TRasterLayout;
+begin
+  Result := L;
+  Result.dataOffset := 0;
+  Result.rowBytes := L.width * 4;
+  Result.dataLength := Result.rowBytes * L.height;
 end;
 
 function EncodeOnly(const d: TBytes; const L: TRasterLayout): TBytes;
-var o: TSink; tailFirst: Int64; flags: Byte; px: TBytes;
+var o: TSink; tailFirst, used: Int64; flags: Byte; px, alt, rgbe, modes: TBytes; y, run: Integer;
 begin
   o.Init;
   o.Put(STREAM_VERSION);
@@ -591,10 +694,29 @@ begin
   if L.bottomUp then flags := flags or 4;
   o.Put(flags);
   o.PutVarint(L.maxval);
+  if L.format = rfHDR then begin
+    { the scanlines' length, and each line's coder, as runs of one mode }
+    if HdrDecode(d, L, rgbe, modes, used) <> psOk then Exit(nil);
+    o.PutVarint(L.dataLength);
+    y := 0;
+    while y < L.height do begin
+      run := 1;
+      while (y + run < L.height) and (modes[y + run] = modes[y]) do Inc(run);
+      o.Put(modes[y]); o.PutVarint(run);
+      Inc(y, run);
+    end;
+  end;
   tailFirst := L.dataOffset + L.dataLength;
   o.PutVarint(Length(d) - tailFirst);
   o.PutBytes(d, tailFirst, Length(d) - tailFirst);
-  px := EncodePixels(d, L);
+  if L.format = rfHDR then px := EncodePixels(rgbe, RgbeLayout(L))
+  else if HasMode(L) then begin
+    { both ways, and the smaller one }
+    px := EncodePixels(d, L, MODE_SAMPLES);
+    alt := EncodePixels(d, L, MODE_INDICES);
+    if Length(alt) < Length(px) then begin o.Put(MODE_INDICES); px := alt; end
+    else o.Put(MODE_SAMPLES);
+  end else px := EncodePixels(d, L);
   o.PutBytes(px, 0, Length(px));
   Result := o.Done;
 end;
@@ -618,8 +740,8 @@ end;
 
 function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes): TDecodeStatus;
 var
-  src: TSource; L: TRasterLayout; hdrLen, tailLen, tailFirst: Int64; flags, f, ver: Integer;
-  hdrFirst, tailSrc: SizeInt;
+  src: TSource; L: TRasterLayout; hdrLen, tailLen, tailFirst, run, y: Int64; flags, f, ver, m, k: Integer;
+  hdrFirst, tailSrc: SizeInt; modes, rgbe, lines: TBytes;
 begin
   d := nil;
   if Length(s) = 0 then Exit(dsEmpty);
@@ -640,6 +762,24 @@ begin
   L.bits := src.Get;
   flags := src.Get;
   L.maxval := src.GetVarint(High(Cardinal));
+  modes := nil;
+  if L.format = rfHDR then begin
+    { the scanlines' length within the cap, and the image within what that
+      length can hold, before anything is allocated }
+    L.dataLength := src.GetVarint(maxOut);
+    if not src.ok then Exit(dsBadStream);
+    if (L.channels <> 4) or (L.bits <> 8) or not HdrFits(L.width, L.height, L.dataLength) then Exit(dsBadStream);
+    L.rowBytes := L.width * 4;
+    SetLength(modes, L.height);
+    y := 0;
+    while src.ok and (y < L.height) do begin
+      m := src.Get;
+      run := src.GetVarint(L.height - y);
+      if (m > HDR_STB) or (run < 1) then Exit(dsBadStream);
+      for k := 0 to Integer(run) - 1 do modes[y + k] := m;
+      Inc(y, run);
+    end;
+  end;
   tailLen := src.GetVarint(High(Int64) shr 1);
   if not src.ok or (flags > 7) or (tailLen > Length(s) - src.p) then Exit(dsBadStream);
   tailSrc := src.p; Inc(src.p, tailLen);
@@ -649,17 +789,32 @@ begin
   L.dataOffset := hdrLen;
   { the limits, before anything is decoded: the pixels have to fit in maxOut }
   if hdrLen + tailLen > maxOut then Exit(dsTooBig);
-  case SizeRows(L, maxOut - hdrLen - tailLen) of
-    psOk: ;
-    psTruncated: Exit(dsTooBig);
-  else Exit(dsBadStream);
-  end;
+  if L.format = rfHDR then begin
+    if L.dataLength > maxOut - hdrLen - tailLen then Exit(dsTooBig);
+  end else
+    case SizeRows(L, maxOut - hdrLen - tailLen) of
+      psOk: ;
+      psTruncated: Exit(dsTooBig);
+    else Exit(dsBadStream);
+    end;
   if not Codable(L) then Exit(dsBadStream);
   SetLength(d, hdrLen + L.dataLength + tailLen);
   if hdrLen > 0 then Move(s[hdrFirst], d[0], hdrLen);
   tailFirst := hdrLen + L.dataLength;
   if tailLen > 0 then Move(s[tailSrc], d[tailFirst], tailLen);
-  DecodePixels(s, src.p, d, L);
+  if L.format = rfHDR then begin
+    { the RGBE pixels, then the scanlines coded again, line by line }
+    rgbe := nil; SetLength(rgbe, L.width * L.height * 4);
+    DecodePixels(s, src.p, rgbe, RgbeLayout(L));
+    lines := HdrEncode(rgbe, modes, L);
+    if Length(lines) <> L.dataLength then begin d := nil; Exit(dsBadStream); end;
+    if Length(lines) > 0 then Move(lines[0], d[hdrLen], Length(lines));
+  end else if HasMode(L) then begin
+    m := src.Get;
+    if not src.ok or (m > MODE_INDICES) then begin d := nil; Exit(dsBadStream); end;
+    DecodePixels(s, src.p, d, L, m);
+  end else
+    DecodePixels(s, src.p, d, L);
   Result := dsOk;
 end;
 

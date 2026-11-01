@@ -17,7 +17,7 @@ up and the caller stores the file as it is.
 | layer | unit | what it does |
 |---|---|---|
 | 2 | `praarith` | binary arithmetic coder (from PJA) |
-| 3 | `praraster`, `prapnm` | parsers: header, pixels, tail |
+| 3 | `praraster`, `prapnm`, `prabmp`, `prahdr` | parsers: header, pixels, tail |
 | 4 | `pramodel` | counters, hashed tables, mixer, APM |
 | 5 | `pracodec` | the stream: layout, header, tail, pixels |
 
@@ -29,9 +29,15 @@ header      varint length, then the bytes as they are
 layout      format 1 B, width, height, channels (varints), bits 1 B,
             flags 1 B (bit 0 big-endian, bit 1 float, bit 2 bottom-up),
             maxval (varint)
+  HDR only: the scanlines' length (varint), then each line's run-length
+            coder as runs: mode 1 B (0 flat, 1 Radiance, 2 stb), count (varint)
 tail        varint length, then the bytes as they are
+  one channel of 2 to 8 bits only: the pixel mode, 1 B (0 samples, 1 indices)
 pixels      arithmetic-coded, to the end of the stream
 ```
+
+Format numbers: 1 PBM, 2 PGM, 3 PPM, 4 PAM, 5 PFM, 6 BMP, 7 HDR. New formats
+take the next number; a number never changes meaning.
 
 The decoder checks the layout against the limits (`pralimits`) and against
 the caller's cap on the output size **before** decoding anything.
@@ -70,6 +76,22 @@ domain, then an APM keyed by the decision and the activity (1/4 input,
 **1-bit images.** Their own model: three templates of 10, 16 and 22
 neighbouring pixels, a mixer selected by the 5 nearest.
 
+**Indices.** One channel of 2 to 8 bits may be intensities or symbols
+(palette indices, a drawing of a few gray levels). The encoder codes it
+both ways and keeps the smaller: as samples (above), or as indices, each
+value coded whole by a binary tree in 8 contexts of the exact neighbouring
+values (W; N; W,N; W,N,NW; W,N,NE; W,WW,NW,N,NE; N,NN,NE; order 0), with
+the mixers and the APM selected by which neighbours are equal.
+
+**Rows with padding.** One channel: the padding samples are coded as
+pixels (a BMP's 4-byte alignment, a PBM's last bits). Several channels (a
+24-bit BMP): the padding bytes after the pixels, through a byte tree in a
+context of their position.
+
+**Radiance HDR.** The scanlines are decoded to RGBE (four 8-bit channels,
+green first, red and blue against it, the exponent last) and each line's
+coder is found (`prahdr`): the decoder codes the lines again the same way.
+
 ## Measurements
 
 Every number says what was measured, on what, and when.
@@ -99,7 +121,49 @@ Tried and left as they were: counter limit 255 (the counters adapt too
 slowly: worse than 127), initial mixer weights (0.09 is best), mixer rates
 6 to 10 (flat).
 
-### 01/11/2026: against packPNM 1.6d
+### 01/11/2026: BMP and HDR, and the indices mode
+
+On the BMP and HDR files of the local corpus. Palette images were the weak
+point: predicted as intensities, their indices compress worse than
+packPNM's order-2 model of the values. Coding them as indices, and keeping
+whichever of the two ways is smaller:
+
+| file | samples | indices (kept) | packPNM |
+|---|---|---|---|
+| SWAN.BGA (8-bit palette) | 273,949 | **120,672** | 189,350 |
+| YARN.BGA | 240,667 | **106,715** | 165,459 |
+| test.bmp | 123,394 | **80,802** | 90,985 |
+| WATER5.BMP | 18,351 | **9,923** | 10,627 |
+| dragon.pgm (few gray levels) | 27,150 | **11,444** | 23,963 |
+| logo (PGM) | 5,224 | **2,158** | 4,142 |
+
+PGM gained the mode byte too: a PGM's stream is one byte longer when the
+samples win (house.l.pgm: 32,126 -> 32,127).
+
+### 01/11/2026: against packPNM 1.6d, the whole corpus
+
+PNM, BMP and HDR files of the local corpus: 92 files, 136.3 MB. Every
+output decompressed and compared with the original; a file a tool does not
+take, or that does not come back byte for byte, counts at its own size.
+packPNM was run with `-p` (or it refuses more), and its `-ver` is not
+enough: on BMAP_3684.pbm (two images) it warns and drops the second one.
+
+| | size | packPNM | PRA |
+|---|---|---|---|
+| all 92 files | 136,297,900 | 86.87% | **46.13%** |
+| the 61 files both give back | 29,272,124 | 38.85% | **34.47%** |
+
+packPNM gives back none of the 9 HDR files PRA takes (none of its rebuilt
+scanlines match), and takes no PAM, PFM, OS/2 2.x BMP or 32-bit BMP with
+bitfields. PRA loses only on files of a few hundred bytes (its stream's
+own header) and on flag_b24.bmp (588 against 546). Neither takes the plain
+P1-P3 files, RLE BMPs or fig8.pic; PRA does not take sunset_final.hdr (its
+scanlines were written by a third coder).
+
+Speed (the fast build, one thread): about 0.2 to 0.4 MB/s each way. Not
+worked on yet.
+
+### 01/11/2026: against packPNM 1.6d (Netpbm only)
 
 The local corpus of Netpbm files (51 files, 81.9 MB). A file a tool does
 not take counts at its own size; packPNM was run with `-ver`.

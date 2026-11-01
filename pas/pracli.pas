@@ -127,7 +127,7 @@ end;
 
 procedure Usage(code: Integer);
 begin
-  Writeln('pra ', PRA_VERSION, ' - lossless recompression of raster images (PNM, PAM, PFM)');
+  Writeln('pra ', PRA_VERSION, ' - lossless recompression of raster images (PNM, PAM, PFM, BMP, HDR)');
   Writeln;
   Writeln('usage: pra a [options] FILE...     compress to .pra');
   Writeln('       pra x [options] FILE...     extract from .pra');
@@ -351,6 +351,8 @@ begin
       rfPPM: Result := '.ppm';
       rfPAM: Result := '.pam';
       rfPFM: Result := '.pfm';
+      rfBMP: Result := '.bmp';
+      rfHDR: Result := '.hdr';
     end;
 end;
 

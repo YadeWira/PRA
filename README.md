@@ -17,8 +17,12 @@ pra list image.pra       # original size, stored size, hash
 The original comes back **byte for byte**, and nothing is written unless it
 verified: `a` decompresses its own result and compares it with the input
 first, and `x` checks the size and the BLAKE3 hash the `.pra` carries.
-Today PRA takes binary PBM, PGM, PPM, PAM and PFM; see
+Today PRA takes binary PBM, PGM, PPM, PAM and PFM, BMP (uncompressed and
+bitfields, 1 to 32 bits) and Radiance HDR; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
+
+On the Netpbm, BMP and HDR files of a local corpus that both give back,
+PRA's output is 11% smaller than packPNM's ([doc/CODEC.md](doc/CODEC.md)).
 
 Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
 
@@ -28,9 +32,10 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | binary arithmetic coder | `pas/praarith.pas` | done, from PJA |
 | raster layout, limits | `pas/praraster.pas`, `pas/pralimits.pas` | done |
 | Netpbm parser (P4-P7, PF/Pf) | `pas/prapnm.pas` | done |
-| more parsers | | BMP, HDR, then [the list](doc/FORMATS.md) |
+| BMP and Radiance HDR parsers | `pas/prabmp.pas`, `pas/prahdr.pas` | done |
+| more formats | | [the list](doc/FORMATS.md) |
 | model (counters, mixers, APM) | `pas/pramodel.pas` | first version |
-| codec stream (version 1) | `pas/pracodec.pas` | first version: 8.8% smaller than packPNM on the files both take |
+| codec stream (version 1) | `pas/pracodec.pas` | first version |
 | container (`.pra`) | `pas/praformat.pas`, `pas/prapack.pas`, `pas/prafs.pas` | done ([doc/FORMAT.md](doc/FORMAT.md)) |
 | command line (`pra`) | `pas/pracli.pas` | done ([doc/CLI.md](doc/CLI.md)) |
 
