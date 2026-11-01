@@ -384,6 +384,18 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
 
+### 01/11/2026: against packPNM 1.6d again, before the first release
+
+The same 99 Netpbm, BMP and HDR files (136.3 MB), the same rules:
+
+| | packPNM | PRA, then | PRA, now |
+|---|---|---|---|
+| all of them | 86.87% | 46.13% | **30.79%** |
+| the 61 both give back | 38.85% | 34.47% | **32.57%** |
+
+PRA now takes the plain Netpbm and RLE BMP files it left before, and the
+match models do the rest.
+
 ### 01/11/2026: 1-bit images: matches and rows further up
 
 A set of 33 1-bit files of the corpus (PBM, WBMP, Sun, fonts, screen

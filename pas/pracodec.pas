@@ -488,7 +488,7 @@ var z: Integer;
 begin
   hist := nil; SetLength(hist, total);
   hbits := BitLen(Integer(Min(total, 1 shl 30))) + 1;
-  if hbits < 12 then hbits := 12 else if hbits > 22 then hbits := 22;
+  if hbits < 12 then hbits := 12 else if hbits > 20 then hbits := 20;
   for z := 0 to 1 do begin tab[z] := nil; SetLength(tab[z], 1 shl hbits); mPtr[z] := 0; mLen[z] := 0; end;
   pos := 0;
 end;

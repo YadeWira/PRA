@@ -40,7 +40,23 @@ comes back byte for byte, and nothing is written unless it verified.
 | [PJA](https://github.com/YadeWira/PJA) | JPEG and JPEG-LS | [packJPG](https://github.com/YadeWira/packJPG) |
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,
-PRA's output is 11% smaller than packPNM's ([doc/CODEC.md](doc/CODEC.md)).
+PRA's output is 16% smaller than packPNM's; on all of them (136 MB, the ones
+packPNM refuses or does not give back counted at their size) PRA makes
+30.8% of the size and packPNM 86.9% ([doc/CODEC.md](doc/CODEC.md)).
+
+## Speed and memory
+
+About 0.6 MB/s a thread, both ways (decoding runs the same model), and the
+bands of a big image on several threads (`-th`, up to 8 by default):
+
+| file | size | `a`, 8 threads | `x`, 8 threads | `a`, 1 thread |
+|---|---|---|---|---|
+| a 10-bit Cineon, 4096 x 3112 | 51 MB | 15 s, 675 MB | 13 s, 401 MB | 81 s, 300 MB |
+| a PSD of layers, 2400 x 3200 | 26 MB | 42 s, 716 MB | 38 s, 361 MB | |
+| a PPM, plain text | 11 MB | 8 s, 140 MB | 7 s, 74 MB | |
+
+Memory grows with the threads: each band has its models, and `a` decodes
+each band beside it as it codes it, to check it.
 
 Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
 
@@ -68,8 +84,6 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 ./run_tests.sh      # needs Free Pascal 3.2.2 and python3; builds and tests everything
 fpc -O3 -dPRA_FAST -Fupas -Fipas -FUbuild -obuild/pra pas/pracli.pas   # just the command
 ```
- See [doc/FORMATS.md](doc/FORMATS.md) for the target
-formats.
 
 ## License
 

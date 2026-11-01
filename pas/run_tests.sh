@@ -17,7 +17,7 @@ echo "== source guards"
 python3 pas/collisions.py pas
 
 echo "== build"
-for prog in test_blake3 test_arith test_model test_pnm test_parsers test_codec test_format test_prafs; do
+for prog in test_blake3 test_arith test_model test_pnm test_parsers test_codec test_format test_prafs fuzz_decode; do
   $FPC -O2 -Fupas -Fipas -FU"$OUT" -FE"$OUT" "pas/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -32,6 +32,8 @@ echo "== tests"
 tail -1 "$OUT/codec.txt"
 
 "$OUT/test_format" tests/pnm tests/bmp tests/hdr tests/other tests/multi tests/sci tests/cont | tail -1
+# the decoder against damaged streams (a short run; pas/tests/fuzz_decode.pas)
+"$OUT/fuzz_decode" 3000 tests/pnm/* tests/bmp/* tests/other/* tests/multi/* tests/sci/* tests/cont/* | tail -1
 # prafs touches the disk: a directory of its own
 rm -rf "$OUT/tmp_fs"; mkdir -p "$OUT/tmp_fs"; "$OUT/test_prafs" "$(realpath "$OUT/tmp_fs")" | tail -1
 

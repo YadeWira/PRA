@@ -56,11 +56,11 @@ that both commands behave the same.
   `scan.PGM` comes back as `scan.PGM` (the `.pra` keeps it, with a check).
   The name is the `.pra`'s own. When there is none to keep (an extension
   the format does not take: more than 15 characters, or anything but
-  letters, digits, `_` and `-`), the content decides: `.pbm`, `.pgm`,
-  `.ppm`, `.pam` or `.pfm`.
-- **`a` refuses what it does not understand**, naming why: a plain (ASCII)
-  PNM is `unsupported variant`, a text file `not this format`. PRA is not
-  a general compressor.
+  letters, digits, `_` and `-`), the content decides: `.pgm`, `.bmp`,
+  `.tif`, `.psd`, `.dcm` and so on, the format's usual one.
+- **`a` refuses what it does not understand**, naming why: a BMP with a
+  JPEG inside is `unsupported variant`, a text file `not this format`. PRA
+  is not a general compressor.
 - **Never larger than the original by more than 52 bytes** (37 and the
   extension): a file the codec does not make smaller is stored as it is,
   and `a` and `list` say so.
@@ -73,6 +73,6 @@ that both commands behave the same.
 - **A write the system refuses is reported in its own words**, with the
   error number: `could not write it: Not a directory (Io(20))`.
 
-Tested by `pas/tests/cli.sh` (51 cells: round trips, existing outputs, links,
-damage, `--keep-corrupt`, `--max-output`, threads, every usage error), and
-on Windows by `pas/tests/windows.ps1` (28 cells, the wildcards among them).
+Tested by `pas/tests/cli.sh` (47 cells: round trips, existing outputs, links,
+damage, `--keep-corrupt`, `--max-output`, threads, every usage error), on
+every platform CI builds.
