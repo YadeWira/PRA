@@ -147,6 +147,21 @@ two cores: the three files, pinned to two cores, **3,244 ms**. A bare
 thread (BeginThread): TThread.WaitFor from the main thread waits in steps
 of 100 ms in FreePascal 3.2, which made every small file 100 ms slower.
 
+Tried and dropped: coding the low bits of a residual (from the 2nd, 3rd or
+4th below the top) with 3 contexts and one mixer instead of the whole
+model: 0.17% to 0.35% larger on the tuning set, and no measurable gain.
+
+Where it stands (the `pra` command, a machine with other work on it):
+
+| file | size | `pra a` | `pra x` |
+|---|---|---|---|
+| sample_1920x1280.ppm (a noisy photo) | 7.37 MB | 10.9 s | 10.2 s |
+| abydos.ppm | 1.44 MB | 1.2 s | 1.1 s |
+
+About 0.7 to 1.2 MB/s each way, from 0.3 MB/s at the start. More would
+need the format to change: independent bands (several threads, as PJA
+does), or fewer contexts.
+
 A smaller counter table (2^16 instead of 2^22) was only 3.5% faster: the
 time goes to computing, not to waiting for memory. Choosing between samples
 and indices on the first 65,536 samples' rows instead of the whole image
@@ -192,8 +207,7 @@ own header) and on flag_b24.bmp (588 against 546). Neither takes the plain
 P1-P3 files, RLE BMPs or fig8.pic; PRA does not take sunset_final.hdr (its
 scanlines were written by a third coder).
 
-Speed (the fast build, one thread): about 0.2 to 0.4 MB/s each way. Not
-worked on yet.
+Speed: see "speed, first pass" above.
 
 ### 01/11/2026: against packPNM 1.6d (Netpbm only)
 
