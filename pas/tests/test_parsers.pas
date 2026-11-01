@@ -563,14 +563,29 @@ begin
   Check((st = psOk) and (L.dataLength = 2 * 13 * 4 * 2), 'acbm_4planes.acbm: ACBM, whole planes');
   dd := Copy(d, 0, Length(d)); dd[12 + 8 + 9] := 1;
   Check(ParseIff(dd, L) = psUnsupported, 'ILBM with a mask plane: unsupported');
+  d := ReadAll(dirC + '/miff_direct.miff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfMIFF) and (L.channels = 3) and (L.dataLength = 29 * 17 * 3),
+    'miff_direct.miff: DirectClass, a comment with a colon in it');
+  d := ReadAll(dirC + '/miff_pseudo_rle.miff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_MIFF_RLE) and (L.channels = 1) and (L.dataOffset + L.dataLength = Length(d)),
+    'miff_pseudo_rle.miff: the old header end, a map, run-length');
+  d := ReadAll(dirC + '/miff_16.miff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 16) and L.bigEndian, 'miff_16.miff: 16 bits');
+  d := ReadAll(dirC + '/miff_rgba_rle.miff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.channels = 4) and (L.coding = CODING_MIFF_RLE), 'miff_rgba_rle.miff: alpha, run-length');
+  dd := Copy(d, 0, Length(d)); SetLength(dd, Length(d) - 3);
+  Check(ParseMiff(dd, L) = psTruncated, 'MIFF run-length cut short: truncated');
+  Check(ParseMiff(Bytes('id=ImageMagick class=DirectClass columns=3 rows=2 compression=Zip'#12#10':'#26'xx'), L) = psUnsupported,
+    'MIFF of Zip: unsupported');
   { mutated containers: never an exception, the parts always the whole file }
-  samples := nil; SetLength(samples, 5);
+  samples := nil; SetLength(samples, 6);
+  samples[5] := ReadAll(dirC + '/miff_pseudo_rle.miff');
   samples[0] := ReadAll(dirC + '/tiff_planar_gap.tif'); samples[1] := ReadAll(dirC + '/psd_layers_rle.psd');
   samples[2] := ReadAll(dirC + '/tiff_big.tif'); samples[3] := ReadAll(dirC + '/ilbm_5planes.iff');
   samples[4] := ReadAll(dirC + '/tiff_tiles.tif');
   bad := 0; oks := 0;
   for i := 1 to 10000 do begin
-    d := Copy(samples[i mod 5], 0, Length(samples[i mod 5]));
+    d := Copy(samples[i mod 6], 0, Length(samples[i mod 6]));
     if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
     for k := 1 to 1 + Integer(Rand mod 3) do
       if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 1024)))] := Byte(Rand);
@@ -582,7 +597,7 @@ begin
       Inc(bad);
     end;
   end;
-  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF: no exception, the parts the whole file (%d split)', [oks]));
+  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF, MIFF: no exception, the parts the whole file (%d split)', [oks]));
 
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
@@ -631,5 +646,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 192) then Halt(1);
+  if (failures > 0) or (cells < 198) then Halt(1);
 end.

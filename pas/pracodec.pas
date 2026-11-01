@@ -887,6 +887,7 @@ begin
   if Result = psNotThis then Result := ParseVips(d, L);
   if Result = psNotThis then Result := ParseDds(d, L);
   if Result = psNotThis then Result := ParseIff(d, L);
+  if Result = psNotThis then Result := ParseMiff(d, L);
   if Result = psNotThis then Result := ParseViff(d, L);
   if Result = psNotThis then Result := ParseDpx(d, L);
   if Result = psNotThis then Result := ParseCineon(d, L);
@@ -944,7 +945,7 @@ function SideCoded(const L: TRasterLayout): Boolean;
 begin
   Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES,
                          CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_EXR, CODING_PACKBITS,
-                         CODING_PLANES_PACKBITS, CODING_ILBM];
+                         CODING_PLANES_PACKBITS, CODING_ILBM, CODING_MIFF_RLE];
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
@@ -972,6 +973,7 @@ begin
     end;
     CODING_PACKBITS: Result := PackBitsScan(d, L.dataOffset, R.dataLength, R.rowBytes, raw, side, used) = psOk;
     CODING_ILBM: Result := IffParams(d, 0, L.dataOffset, ix) and IffScan(d, L.dataOffset, ix, R, raw, side, used);
+    CODING_MIFF_RLE: Result := MiffRleScan(d, L.dataOffset, L.width * L.height, PixelBytes(L), raw, side, used) = psOk;
     CODING_PLANES_PACKBITS: begin
       { the planes' rows: a channel's samples in a row }
       Result := PackBitsScan(d, L.dataOffset, R.dataLength, R.rowBytes div L.channels, dec, side, used) = psOk;
@@ -1013,6 +1015,7 @@ begin
         and (Length(coded) = L.dataLength);
     CODING_PACKBITS: Result := PackBitsRebuild(raw, side, R.rowBytes, L.dataLength, coded);
     CODING_ILBM: Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and IffRebuild(raw, side, ix, L.dataLength, coded);
+    CODING_MIFF_RLE: Result := MiffRleRebuild(raw, side, PixelBytes(L), L.dataLength, coded);
     CODING_PLANES_PACKBITS:
       Result := PackBitsRebuild(SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8), side,
                                 R.rowBytes div L.channels, L.dataLength, coded);
@@ -1049,6 +1052,7 @@ begin
       and (L.dataLength = L.height * (16 + L.width * L.channels * (L.bits div 8)));
     CODING_PACKBITS: Result := (R.rowBytes >= 1) and PackBitsFits(R.dataLength, L.dataLength);
     CODING_PLANES_PACKBITS: Result := (L.bits in [8, 16]) and PackBitsFits(R.dataLength, L.dataLength);
+    CODING_MIFF_RLE: Result := (L.bits in [8, 16]) and MiffRleFits(L.width * L.height, PixelBytes(L), L.dataLength);
     CODING_ILBM: begin
       { the pixels have to be the ones the header's planes make }
       Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and (L.bits = 8) and (L.height = ix.h)
@@ -1135,6 +1139,7 @@ begin
     rfEXR: h.L.coding := CODING_EXR;
     rfTIFF: if (flags and 8) <> 0 then h.L.coding := CODING_PACKBITS;
     rfIFF: h.L.coding := CODING_ILBM;
+    rfMIFF: if (flags and 8) <> 0 then h.L.coding := CODING_MIFF_RLE;
     { PSD: PackBits or not, planes or not }
     rfPSD:
       if (flags and 8) <> 0 then begin
@@ -1143,7 +1148,7 @@ begin
   end;
   if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE,
                                                    CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_PACKBITS,
-                                                   CODING_PLANES_PACKBITS])
+                                                   CODING_PLANES_PACKBITS, CODING_MIFF_RLE])
      and not ((h.L.coding = CODING_PLANES) and (h.L.format in [rfFITS, rfVICAR, rfDICOM])) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
     { the coded length within the cap, the image within what that length
@@ -1442,7 +1447,7 @@ begin
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
   if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10,
-                  CODING_PACKBITS, CODING_PLANES_PACKBITS] then flags := flags or 8;
+                  CODING_PACKBITS, CODING_PLANES_PACKBITS, CODING_MIFF_RLE] then flags := flags or 8;
   if (L.coding = CODING_PLANES) and (L.format in [rfFITS, rfVICAR, rfDICOM]) then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);

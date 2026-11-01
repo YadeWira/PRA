@@ -827,3 +827,27 @@ b4, rb = bitplanes(25, 13, 4, lambda x, y: (x + 2 * y) % 16, plane_major=True)
 iff('acbm_4planes.acbm', b'ACBM', 25, 13, 4, 0, b4)
 b24, rb = bitplanes(20, 9, 24, lambda x, y: (smooth(x, y, 0, 255)) | (smooth(x, y, 1, 255) << 8) | (smooth(x, y, 2, 255) << 16))
 iff('ilbm_24.iff', b'ILBM', 20, 9, 24, 0, b24, cmap=False)
+
+# MIFF: DirectClass as it is (new header end ':' ^Z), PseudoClass run-length
+# (the old end: form feed, line feed, ':', line feed), 16 bits, RGBA RLE
+def miff_rle(pixels, ps):
+    out = bytearray(); i = 0; n = len(pixels) // ps
+    while i < n:
+        r = 1
+        while i + r < n and r < 256 and pixels[(i + r) * ps:(i + r + 1) * ps] == pixels[i * ps:(i + 1) * ps]: r += 1
+        out += pixels[i * ps:(i + 1) * ps] + bytes([r - 1]); i += r
+    return bytes(out)
+w, h = 29, 17
+write('miff_direct.miff', b'id=ImageMagick  version=1.0\nclass=DirectClass  colors=0  matte=False\ncolumns=%d  rows=%d  depth=8\n{a comment: here}\n\x0c\n:\x1a' % (w, h)
+      + b''.join(bytes([smooth(x, y, c, 255) for c in range(3)]) for y in range(h) for x in range(w)))
+w, h = 33, 21
+idx = bytes(((x // 5) + (y // 4)) % 12 if (x + y) % 7 else 3 for y in range(h) for x in range(w))
+cmap = bytes((i * 23 + k * 61) % 256 for i in range(12) for k in range(3))
+write('miff_pseudo_rle.miff', b'{\n  made by mksamples\n}\nid=ImageMagick\nclass=PseudoClass  colors=12\ncompression=RunlengthEncoded\ncolumns=%d  rows=%d\n\x0c\n:\n' % (w, h)
+      + cmap + miff_rle(idx, 1))
+w, h = 19, 11
+write('miff_16.miff', b'id=ImageMagick\nclass=DirectClass  matte=False\ncolumns=%d  rows=%d  depth=16\n\x0c\n:\x1a' % (w, h)
+      + b''.join(struct.pack('>3H', *[smooth(x, y, c, 65535) for c in range(3)]) for y in range(h) for x in range(w)))
+w, h = 24, 14
+rgba = b''.join(bytes([smooth(x // 3 * 3, y // 2 * 2, c, 255) for c in range(3)] + [255]) for y in range(h) for x in range(w))
+write('miff_rgba_rle.miff', b'id=ImageMagick\nclass=DirectClass  alpha-trait=Blend\ncompression=RLE\ncolumns=%d  rows=%d  depth=8\n\x0c\n:\x1a' % (w, h) + miff_rle(rgba, 4))

@@ -51,7 +51,9 @@ work in place).
 | TIFF / BigTIFF | raw / PackBits | tiff 126, bigTIFF 8 | **done**: strips and tiles, uncompressed or PackBits, 1 to 16 bits, floats, chunky or planar, every directory; LZW, Deflate, JPEG, CCITT stay as bytes |
 | PSD | raw / PackBits | psd 15 | **done**: the composite (interleaved) and each layer's channels and mask, raw or PackBits; PSB too; ZIP not yet |
 | IFF ILBM | ByteRun1, bitplanes | iffILBM 128 | **done**: ILBM (1-8, 24, 32 planes), PBM, ACBM; not RGBN/RGB8, VDAT, mask planes |
-| PICT, XCF, MIFF, Palm, Intergraph, VTF | various | pict 67, xcf 10, miff 18, palmBitmap 11, intergraphRasterImage 12, vtf 10 |
+| MIFF | raw / RLE | miff 18 | **done**: PseudoClass and DirectClass (gray, RGB, CMYK, alpha), 8 and 16 bits, ImageMagick's RLE, old and new headers, montages; not Zip/BZip |
+| PICT, XCF | PackBits opcodes / GIMP RLE tiles | pict 67, xcf 10 | next |
+| Palm, Intergraph, VTF | raw / RLE / DXT | palmBitmap 11, intergraphRasterImage 12, vtf 10 | left: Palm's files are tiny (44 KB in all), Intergraph's are CCITT G4 or 1-bit runs, every VTF is DXT |
 
 ## Out of scope
 

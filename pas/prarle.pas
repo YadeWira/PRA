@@ -144,6 +144,18 @@ function PackBitsRebuild(const raw, side: TBytes; lineLen, usedLimit: Int64; out
 { a packet holds at most 128 bytes in 2 }
 function PackBitsFits(count, available: Int64): Boolean;
 
+{ ---------- MIFF run-length (ImageMagick) ---------- }
+
+{ Packets of a pixel (ps bytes) and a count byte (the run less one), the
+  runs across rows. npix pixels at d[first..]: the pixels, the counts
+  coded (side), the coded length. }
+function MiffRleScan(const d: TBytes; first: SizeInt; npix: Int64; ps: Integer;
+                     out raw, side: TBytes; out used: Int64): TParseStatus;
+function MiffRleLength(const d: TBytes; first: SizeInt; npix: Int64; ps: Integer; out used: Int64): TParseStatus;
+function MiffRleRebuild(const raw, side: TBytes; ps: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
+{ a packet holds at most 256 pixels in ps + 1 bytes }
+function MiffRleFits(npix: Int64; ps: Integer; available: Int64): Boolean;
+
 implementation
 
 
@@ -1202,6 +1214,99 @@ begin
       Inc(o, 1 + cnt);
     end;
     Inc(n, cnt);
+  end;
+  Result := o = usedLimit;
+end;
+
+
+{ ---------- MIFF run-length ---------- }
+
+function MiffRleFits(npix: Int64; ps: Integer; available: Int64): Boolean;
+begin
+  Result := (npix >= 1) and (ps >= 1) and (ps <= 32) and (npix <= MAX_RAW div ps)
+    and ((npix + 255) div 256 * (ps + 1) <= available);
+end;
+
+function MiffRleLength(const d: TBytes; first: SizeInt; npix: Int64; ps: Integer; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64;
+begin
+  used := 0;
+  if (npix < 1) or (ps < 1) then Exit(psMalformed);
+  if not MiffRleFits(npix, ps, Length(d) - first) then Exit(psTruncated);
+  p := first; n := 0;
+  while n < npix do begin
+    if p + ps + 1 > Length(d) then Exit(psTruncated);
+    Inc(n, d[p + ps] + 1);
+    if n > npix then Exit(psMalformed);          { a run past the image }
+    Inc(p, ps + 1);
+  end;
+  used := p - first;
+  Result := psOk;
+end;
+
+{ the pixels equal to pixel n from n on, at most 256 }
+function PixelRunAt(const raw: TBytes; n, total: Int64; ps: Integer): Integer;
+var k: Integer;
+begin
+  Result := 1;
+  while (Result < 256) and (n + Result < total) do begin
+    for k := 0 to ps - 1 do
+      if raw[(n + Result) * ps + k] <> raw[n * ps + k] then Exit;
+    Inc(Result);
+  end;
+end;
+
+{ a packet's count, both ways: nearly always the whole run there is }
+function CodeMiffCount(var pc: TPacketCoder; const raw: TBytes; n, total: Int64; ps, count: Integer): Integer;
+var er: Integer;
+begin
+  er := PixelRunAt(raw, n, total, ps);
+  if pc.Bit(BmpBucket(er), Ord(count = er)) <> 0 then Result := er
+  else Result := pc.Tree(256, count - 1, 8) + 1;
+end;
+
+function MiffRleScan(const d: TBytes; first: SizeInt; npix: Int64; ps: Integer;
+                     out raw, side: TBytes; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; c, k, j: Integer; pc: TPacketCoder;
+begin
+  raw := nil; side := nil;
+  Result := MiffRleLength(d, first, npix, ps, used);
+  if Result <> psOk then Exit;
+  SetLength(raw, npix * ps);
+  p := first; n := 0;
+  while n < npix do begin
+    c := d[p + ps] + 1;
+    for j := 0 to c - 1 do
+      for k := 0 to ps - 1 do raw[(n + j) * ps + k] := d[p + k];
+    Inc(n, c); Inc(p, ps + 1);
+  end;
+  pc.Init(True, nil);
+  p := first; n := 0;
+  while n < npix do begin
+    c := d[p + ps] + 1;
+    CodeMiffCount(pc, raw, n, npix, ps, c);
+    Inc(n, c); Inc(p, ps + 1);
+  end;
+  side := pc.enc.Finish;
+end;
+
+function MiffRleRebuild(const raw, side: TBytes; ps: Integer; usedLimit: Int64; out coded: TBytes): Boolean;
+var pc: TPacketCoder; n, total: Int64; o: SizeInt; c, k: Integer;
+begin
+  coded := nil; Result := False;
+  if (ps < 1) or (usedLimit < 0) or (Length(raw) mod ps <> 0) then Exit;
+  total := Length(raw) div ps;
+  SetLength(coded, usedLimit);
+  pc.Init(False, side);
+  n := 0; o := 0;
+  while n < total do begin
+    c := CodeMiffCount(pc, raw, n, total, ps, 1);
+    if (c < 1) or (n + c > total) or (o + ps + 1 > usedLimit) then Exit;
+    for k := 1 to c - 1 do
+      if not CompareMem(@raw[(n + k) * ps], @raw[n * ps], ps) then Exit;   { only a damaged side }
+    for k := 0 to ps - 1 do coded[o + k] := raw[n * ps + k];
+    coded[o + ps] := c - 1;
+    Inc(o, ps + 1); Inc(n, c);
   end;
   Result := o = usedLimit;
 end;

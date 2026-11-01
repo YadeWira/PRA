@@ -46,7 +46,11 @@
   - IFF: FORM ILBM (1 to 8 bitplanes, or 24, 32), PBM (bytes) and ACBM (whole
     planes one after the other), uncompressed or ByteRun1 (PackBits):
     the planes become pixels as wide as the rows' padding to 16 bits, and
-    the BMHD tells the decoder how. What follows the BODY is the tail. }
+    the BMHD tells the decoder how. What follows the BODY is the tail.
+  - MIFF (ImageMagick): a text header to ':' and ^Z (older: a line feed),
+    a colour map (PseudoClass), then the pixels (indices, or RGB, CMYK,
+    gray, with alpha), 8 or 16 bits, as they are or run-length coded
+    (a pixel and a count). Several images in a row: praparts. }
 unit praother;
 
 {$I pra.inc}
@@ -69,6 +73,7 @@ function ParseViff(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseVips(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseDds(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseIff(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseMiff(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 { ---------- IFF bitplanes ---------- }
 type
@@ -758,6 +763,117 @@ begin
   IffPlanes(x, dec, r, False);
   if x.compression = 1 then Result := PackBitsRebuild(dec, side, x.rb, usedLimit, coded)
   else begin coded := dec; Result := Length(coded) = usedLimit; end;
+end;
+
+
+function TextOf(const d: TBytes; first, len: Int64): string;
+var k: Integer;
+begin
+  Result := '';
+  SetLength(Result, len);
+  for k := 1 to Integer(len) do Result[k] := Chr(d[first + k - 1]);
+end;
+
+{ ---------- MIFF (ImageMagick) ---------- }
+
+{ a key's value in a MIFF header (text, comments in braces taken out):
+  KEY=value, KEY at the start or after whitespace; '' if none }
+function MiffValue(const h, key: string): string;
+var p, q, at: Integer; k: string;
+begin
+  Result := '';
+  k := LowerCase(key) + '=';
+  p := 1;
+  while True do begin
+    at := Pos(k, Copy(h, p, Length(h) - p + 1));
+    if at = 0 then Exit;
+    p := p + at - 1;
+    if (p = 1) or (h[p - 1] in [' ', #9, #10, #13, #12]) then Break;
+    Inc(p);
+  end;
+  q := p + Length(k);
+  while (q <= Length(h)) and not (h[q] in [' ', #9, #10, #13, #12]) do begin Result := Result + h[q]; Inc(q); end;
+end;
+
+function ParseMiff(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var
+  p, endAt, colors, depth, bytes, cmap, w, h, used: Int64; inBrace: Boolean; hdr, cls, comp, cs, matte, v: string;
+  ch, ps: Integer;
+begin
+  L.Clear;
+  { "id=ImageMagick" first, perhaps after a comment }
+  if Length(d) < 16 then Exit(psNotThis);
+  p := 0;
+  while (p < Length(d)) and (d[p] in [9, 10, 12, 13, 32]) do Inc(p);
+  if (p < Length(d)) and (d[p] = Ord('{')) then begin
+    while (p < Length(d)) and (d[p] <> Ord('}')) and (p < 65536) do Inc(p);
+    Inc(p);
+    while (p < Length(d)) and (d[p] in [9, 10, 12, 13, 32]) do Inc(p);
+  end;
+  if (p + 14 > Length(d)) or (LowerCase(TextOf(d, p, 14)) <> 'id=imagemagick') then Exit(psNotThis);
+  { the header: to a ':' then ^Z (or, older, a line feed), comments aside }
+  hdr := ''; inBrace := False; endAt := -1; p := 0;
+  while (p + 1 < Length(d)) and (p < MAX_TEXT_HEADER) do begin
+    if inBrace then begin if d[p] = Ord('}') then inBrace := False; end
+    else if d[p] = Ord('{') then inBrace := True
+    else if (d[p] = Ord(':')) and (d[p + 1] in [$1A, 10]) then begin endAt := p + 2; Break; end
+    else hdr := hdr + Chr(d[p]);
+    Inc(p);
+  end;
+  if endAt < 0 then Exit(psMalformed);
+  hdr := LowerCase(hdr);
+  cls := MiffValue(hdr, 'class'); comp := MiffValue(hdr, 'compression'); cs := MiffValue(hdr, 'colorspace');
+  w := StrToInt64Def(MiffValue(hdr, 'columns'), -1); h := StrToInt64Def(MiffValue(hdr, 'rows'), -1);
+  depth := StrToInt64Def(MiffValue(hdr, 'depth'), 8);
+  colors := StrToInt64Def(MiffValue(hdr, 'colors'), 0);
+  matte := MiffValue(hdr, 'matte');
+  v := MiffValue(hdr, 'alpha-trait');
+  if (v <> '') and (v <> 'undefined') then matte := 'true';
+  if (w < 1) or (h < 1) or (w > MAX_DIMENSION) or (h > MAX_DIMENSION) then Exit(psMalformed);
+  if (depth <> 8) and (depth <> 16) then Exit(psUnsupported);
+  if (comp <> '') and (comp <> 'none') and (comp <> 'runlengthencoded') and (comp <> 'rle') then Exit(psUnsupported);
+  if (MiffValue(hdr, 'endian') = 'lsb') and (depth > 8) then Exit(psUnsupported);
+  bytes := depth div 8;
+  { a montage: its directory (names) up to a zero byte, before the map }
+  if MiffValue(hdr, 'montage') <> '' then begin
+    while (endAt < Length(d)) and (d[endAt] <> 0) and (endAt < MAX_TEXT_HEADER) do Inc(endAt);
+    if endAt >= Length(d) then Exit(psTruncated);
+    Inc(endAt);
+  end;
+  cmap := 0;
+  if cls = 'pseudoclass' then begin
+    if (colors < 1) or (colors > 65536) then Exit(psMalformed);
+    cmap := colors * 3 * bytes;
+    { an index of 1 byte, or 2 past 256 colours; then the alpha, if any }
+    if colors > 256 then ps := 2 else ps := 1;
+    ch := 1;
+    if matte = 'true' then begin
+      if ps <> bytes then Exit(psUnsupported);
+      ch := 2;
+    end;
+    L.bits := 8 * ps;
+  end else if (cls = 'directclass') or (cls = '') then begin
+    if cs = 'cmyk' then ch := 4 else if cs = 'gray' then ch := 1 else ch := 3;
+    if matte = 'true' then Inc(ch);
+    L.bits := depth;
+  end else Exit(psUnsupported);
+  L.format := rfMIFF;
+  L.width := w; L.height := h; L.channels := ch; L.bigEndian := True;
+  L.maxval := (Int64(1) shl L.bits) - 1;
+  L.dataOffset := endAt + cmap;
+  if L.dataOffset > MAX_TEXT_HEADER then begin L.format := rfNone; Exit(psUnsupported); end;
+  if L.dataOffset > Length(d) then begin L.format := rfNone; Exit(psTruncated); end;
+  if (comp = 'runlengthencoded') or (comp = 'rle') then begin
+    L.coding := CODING_MIFF_RLE;
+    Result := SizeRows(L, High(Int64) shr 2);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+    ps := L.channels * L.bits div 8;
+    Result := MiffRleLength(d, L.dataOffset, L.width * L.height, ps, used);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+    L.dataLength := used;
+    Exit(psOk);
+  end;
+  Result := Finish(d, L);
 end;
 
 end.

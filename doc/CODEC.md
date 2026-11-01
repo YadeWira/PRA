@@ -381,6 +381,15 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
 
+### 01/11/2026: MIFF
+
+17 files of the corpus, 3.85 MB -> 467 KB (12.1%), every one back byte for
+byte, every one below xz (dna.mif 108,909 against 170,200; aquarium.miff
+69,010 against 95,620). ImageMagick's RLE is a pixel and a count, the runs
+across rows; the counts are coded against the run there is (nearly free).
+Old headers end in form feed, line feed, ':', line feed; a montage has its
+directory of names before the map.
+
 ### 01/11/2026: match models (stream version 4)
 
 Tuning set (10 photos, 18 MB) and a synthetic set (18 icons, screen dumps,

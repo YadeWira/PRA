@@ -36,7 +36,7 @@ type
     rfICO, rfCUR, rfDCX,
     rfDPX, rfCineon, rfFITS, rfVICAR, rfDICOM, rfEXR,
     { a TIFF file is parts (praparts); its strips are images of this format }
-    rfTIFF, rfPSD, rfIFF);
+    rfTIFF, rfPSD, rfIFF, rfMIFF);
 
   TParseStatus = (
     psOk,
@@ -60,7 +60,8 @@ const
   CODING_EXR = 10;
   CODING_PACKBITS = 11; { PackBits (prarle): TIFF strips, PSD channels }
   CODING_PLANES_PACKBITS = 12;
-  CODING_ILBM = 13;     { IFF ILBM, PBM, ACBM: bitplanes, ByteRun1 (praother) }  { PackBits of planes, interleaved for the codec: PSD's composite }      { OpenEXR scanlines: offsets, blocks, channels per line (prasci) }
+  CODING_ILBM = 13;
+  CODING_MIFF_RLE = 14; { MIFF: a pixel and a count (prarle) }     { IFF ILBM, PBM, ACBM: bitplanes, ByteRun1 (praother) }  { PackBits of planes, interleaved for the codec: PSD's composite }      { OpenEXR scanlines: offsets, blocks, channels per line (prasci) }
   CODING_PLANES = 6;    { verbatim, the channels' planes one after the other
                           (SGI, VIFF): interleaved for the codec (prarle) }
 
@@ -135,6 +136,7 @@ begin
     rfTIFF: Result := 'TIFF';
     rfPSD: Result := 'PSD';
     rfIFF: Result := 'IFF';
+    rfMIFF: Result := 'MIFF';
   else Result := 'none';
   end;
 end;

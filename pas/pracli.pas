@@ -377,6 +377,7 @@ begin
     rfTIFF: Result := '.tif';
     rfPSD: Result := '.psd';
     rfIFF: Result := '.iff';
+    rfMIFF: Result := '.miff';
   end;
 end;
 
