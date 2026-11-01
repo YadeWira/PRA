@@ -24,22 +24,22 @@ done
 "$OUT/t/test_arith$EXE" | tail -1
 "$OUT/t/test_model$EXE" | tail -1
 "$OUT/t/test_pnm$EXE" | tail -1
-"$OUT/t/test_parsers$EXE" tests/bmp tests/hdr tests/other tests/multi tests/sci | tail -1
-"$OUT/t/test_codec$EXE" tests/bmp tests/hdr tests/other tests/multi tests/sci | tail -2
-"$OUT/t/test_format$EXE" tests/pnm tests/bmp tests/hdr tests/other tests/multi tests/sci | tail -1
+"$OUT/t/test_parsers$EXE" tests/bmp tests/hdr tests/other tests/multi tests/sci tests/cont | tail -1
+"$OUT/t/test_codec$EXE" tests/bmp tests/hdr tests/other tests/multi tests/sci tests/cont | tail -2
+"$OUT/t/test_format$EXE" tests/pnm tests/bmp tests/hdr tests/other tests/multi tests/sci tests/cont | tail -1
 
 echo "== the command"
 $FPC -O3 -dPRA_FAST -Fupas -Fipas -FU"$OUT/u" -o"$OUT/pra$EXE" pas/pracli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/pra$EXE" --version
-"$OUT/pra$EXE" a -q --output-dir="$OUT/p" tests/pnm/* tests/bmp/* tests/hdr/* tests/other/* tests/multi/* tests/sci/*
+"$OUT/pra$EXE" a -q --output-dir="$OUT/p" tests/pnm/* tests/bmp/* tests/hdr/* tests/other/* tests/multi/* tests/sci/* tests/cont/*
 "$OUT/pra$EXE" x -q --output-dir="$OUT/x" "$OUT"/p/*.pra
 n=0
-for f in tests/pnm/* tests/bmp/* tests/hdr/* tests/other/* tests/multi/* tests/sci/*; do
+for f in tests/pnm/* tests/bmp/* tests/hdr/* tests/other/* tests/multi/* tests/sci/* tests/cont/*; do
   n=$((n + 1))
   cmp -s "$f" "$OUT/x/$(basename "$f")" || { echo "FAIL: $(basename "$f") does not come back"; exit 1; }
 done
-[ "$n" -ge 98 ] || { echo "FAIL: only $n samples"; exit 1; }
+[ "$n" -ge 111 ] || { echo "FAIL: only $n samples"; exit 1; }
 echo "$n samples back byte for byte"
 
 echo "== the .pra files"

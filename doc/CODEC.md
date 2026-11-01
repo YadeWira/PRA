@@ -59,11 +59,18 @@ other; the file is the parts joined.
 ```
 version     1 B     3
 parts       how many (varint), then each:
-  kind      1 B: 0 bytes, 1 image
+  kind      1 B: 0 bytes, 1 image, 2 copy
   bytes:    a section (as above)
   image:    its length in the file (varint), its stream's length (varint),
             then its stream: version 2, as if the image were a file
+  copy:     its length (varint), and where the same bytes are earlier in
+            the file (varint)
 ```
+
+A part that is byte for byte an earlier one (64 bytes and more) is a copy:
+a PSD whose layer is its composite, an icon's masks alike. A PSD's
+composite is cut plane by plane when a plane is a layer's channel (the
+planes between such ones stay one interleaved image).
 
 An image whose stream is not smaller than it (a 2 x 2 mipmap) is coded as
 bytes instead, and bytes next to bytes are one part. If no image is left,
@@ -193,6 +200,25 @@ y, its size) are rebuilt from the layout and the data window's ymin;
 each line's channels, one after the other in the file, are interleaved for
 the model. A file whose lines are not one after the other, in order, is
 left.
+
+**PackBits** (TIFF 32773, PSD, IFF's ByteRun1): a header byte, n + 1
+literal bytes or 257 - n copies; the choices coded as with the others,
+against the run and the literal a usual writer makes, in the line or past
+it. PSD's composite is its channels' planes: decoded, then interleaved for
+the model (CODING_PLANES_PACKBITS).
+
+**IFF bitplanes.** ILBM's rows hold each plane's bits in turn (ACBM: whole
+planes one after another); they become pixels (8-bit indices, or 8 bits a
+channel for 24 and 32 planes) as wide as the rows' padding to 16 bits, so
+the padding's bits come back too. The BMHD in the kept header tells the
+decoder how many planes and whether ByteRun1.
+
+**TIFF and PSD are parts.** A TIFF's directories point at strips or tiles
+anywhere in the file: `praparts` cuts the file at them, strips that follow
+each other become one image, tiles of one image stack into one as wide as
+a tile; the rest (header, directories, LZW or JPEG strips) is bytes. A
+PSD's layers' channels (and masks) are images each, its composite one
+image of all its channels.
 
 **Plain Netpbm (P1, P2, P3).** The numbers are an image (`praplain`); the
 writer's formatting is coded beside them: the separator before each
@@ -344,6 +370,28 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: containers (batch 3): TIFF, PSD, IFF
+
+TIFF and BigTIFF (uncompressed and PackBits strips and tiles), PSD and PSB
+(layers' channels and masks, the composite), IFF (ILBM, PBM, ACBM); every
+file back byte for byte. Against xz -9e, on the files PRA takes:
+
+| | files | size | PRA | xz |
+|---|---|---|---|---|
+| TIFF | 64 | 128.1 MB | 58.8 MB | 78.6 MB |
+| PSD | 13 | 81.4 MB | 24.4 MB | 23.7 MB |
+| IFF | 99 | 9.0 MB | 3.19 MB | 5.08 MB |
+
+PSD: the composite interleaved was 27-35% smaller than its planes one under
+the other. Several PSDs keep a layer that is the composite again: as
+copies (a parts stream's kind 2) sample_1920x1280.psd went from 7.55 MB to
+4.82 MB (xz 5.18), Tour.psd 289 to 199 KB (xz 229). Where PRA still loses
+(example.psd 10.8 MB to xz's 8.65, main1, example_small) the layers are
+near copies of the composite, not the same bytes: a match model's work.
+TIFF: tiles stacked into one image made TOPO.HMR (thousands of tiles) 3.5
+times faster. Fuzzing found a BigTIFF directory count that overflowed.
+LZW, Deflate, JPEG and CCITT strips stay as bytes.
 
 ### 01/11/2026: film and science (batch 2)
 

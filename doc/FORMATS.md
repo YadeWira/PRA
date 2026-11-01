@@ -46,11 +46,11 @@ work in place).
 
 ## Batch 3: complex containers
 
-| Format | Pixels | Corpus folder (files) |
-|---|---|---|
-| TIFF / BigTIFF | raw / PackBits | tiff 126, bigTIFF 8 |
-| PSD | raw / PackBits | psd 15 |
-| IFF ILBM | ByteRun1, bitplanes | iffILBM 128 |
+| Format | Pixels | Corpus folder (files) | Status |
+|---|---|---|---|
+| TIFF / BigTIFF | raw / PackBits | tiff 126, bigTIFF 8 | **done**: strips and tiles, uncompressed or PackBits, 1 to 16 bits, floats, chunky or planar, every directory; LZW, Deflate, JPEG, CCITT stay as bytes |
+| PSD | raw / PackBits | psd 15 | **done**: the composite (interleaved) and each layer's channels and mask, raw or PackBits; PSB too; ZIP not yet |
+| IFF ILBM | ByteRun1, bitplanes | iffILBM 128 | **done**: ILBM (1-8, 24, 32 planes), PBM, ACBM; not RGBN/RGB8, VDAT, mask planes |
 | PICT, XCF, MIFF, Palm, Intergraph, VTF | various | pict 67, xcf 10, miff 18, palmBitmap 11, intergraphRasterImage 12, vtf 10 |
 
 ## Out of scope

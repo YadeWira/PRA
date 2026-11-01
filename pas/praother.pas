@@ -42,7 +42,11 @@
   - DDS, uncompressed: "DDS ", a 124-byte header, then the main surface (a
     volume's slices one under the other); its mipmaps and a cube map's
     other faces stay in the tail. Compressed surfaces (DXT, BC) are not
-    raw pixels: PRA leaves them. }
+    raw pixels: PRA leaves them.
+  - IFF: FORM ILBM (1 to 8 bitplanes, or 24, 32), PBM (bytes) and ACBM (whole
+    planes one after the other), uncompressed or ByteRun1 (PackBits):
+    the planes become pixels as wide as the rows' padding to 16 bits, and
+    the BMHD tells the decoder how. What follows the BODY is the tail. }
 unit praother;
 
 {$I pra.inc}
@@ -64,6 +68,25 @@ function ParseMtv(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseViff(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseVips(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseDds(const d: TBytes; out L: TRasterLayout): TParseStatus;
+function ParseIff(const d: TBytes; out L: TRasterLayout): TParseStatus;
+
+{ ---------- IFF bitplanes ---------- }
+type
+  TIffKind = (ikILBM, ikPBM, ikACBM);
+  TIffParams = record
+    kind: TIffKind;
+    w, h: Int64;
+    planes, compression: Integer;
+    rb: Int64;               { bytes a plane's row (ILBM, ACBM) or a row (PBM) }
+  end;
+{ what the header (at hdr[first..first+len)) says of the body }
+function IffParams(const hdr: TBytes; first, len: SizeInt; out x: TIffParams): Boolean;
+{ the body's bytes once decoded }
+function IffDecodedLength(const x: TIffParams): Int64;
+{ the body at d[first..]: pixels (L: their layout), the PackBits choices }
+function IffScan(const d: TBytes; first: SizeInt; const x: TIffParams; const L: TRasterLayout;
+                 out raw, side: TBytes; out used: Int64): Boolean;
+function IffRebuild(const raw, side: TBytes; const x: TIffParams; usedLimit: Int64; out coded: TBytes): Boolean;
 
 { XWD: the bytes a row takes, from its header (at hdr[first..first+len));
   -1 if that is not an XWD header }
@@ -587,6 +610,154 @@ begin
   if L.isFloat then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
   L.dataOffset := 128;
   Result := Finish(d, L);
+end;
+
+
+{ ---------- IFF: ILBM, PBM, ACBM ---------- }
+
+function IffParams(const hdr: TBytes; first, len: SizeInt; out x: TIffParams): Boolean;
+var p, e, sz: Int64; typ: string; k: Integer; mask: Integer; haveBmhd: Boolean;
+begin
+  Result := False;
+  x.kind := ikILBM; x.w := 0; x.h := 0; x.planes := 0; x.compression := 0; x.rb := 0;
+  if (first < 0) or (len < 12) or (first + len > Length(hdr)) then Exit;
+  if (hdr[first] <> Ord('F')) or (hdr[first + 1] <> Ord('O')) or (hdr[first + 2] <> Ord('R')) or (hdr[first + 3] <> Ord('M')) then Exit;
+  typ := '';
+  for k := 8 to 11 do typ := typ + Chr(hdr[first + k]);
+  if typ = 'ILBM' then x.kind := ikILBM else if typ = 'PBM ' then x.kind := ikPBM
+  else if typ = 'ACBM' then x.kind := ikACBM else Exit;
+  p := first + 12; e := first + len; haveBmhd := False; mask := 0;
+  while p + 8 <= e do begin
+    sz := U32BE(hdr, p + 4);
+    if (hdr[p] = Ord('B')) and (hdr[p + 1] = Ord('M')) and (hdr[p + 2] = Ord('H')) and (hdr[p + 3] = Ord('D')) then begin
+      if (sz < 20) or (p + 8 + 20 > e) then Exit;
+      x.w := (hdr[p + 8] shl 8) or hdr[p + 9]; x.h := (hdr[p + 10] shl 8) or hdr[p + 11];
+      x.planes := hdr[p + 16]; mask := hdr[p + 17]; x.compression := hdr[p + 18];
+      haveBmhd := True;
+    end;
+    Inc(p, 8 + sz + (sz and 1));
+  end;
+  if not haveBmhd or (x.w < 1) or (x.h < 1) then Exit;
+  { ACBM's planes are never compressed, whatever the BMHD says }
+  if x.kind = ikACBM then x.compression := 0;
+  { a mask plane (masking 1) is not taken; 2 (a transparent colour) is }
+  if (mask = 1) or not (x.compression in [0, 1]) then Exit;
+  case x.kind of
+    ikPBM: begin
+      if x.planes <> 8 then Exit;
+      x.rb := x.w + (x.w and 1);
+    end;
+    ikACBM: begin
+      if not (x.planes in [1..8]) then Exit;
+      x.rb := (x.w + 15) div 16 * 2;
+    end;
+  else
+    if not (x.planes in [1..8, 24, 32]) then Exit;
+    x.rb := (x.w + 15) div 16 * 2;
+  end;
+  Result := True;
+end;
+
+function IffDecodedLength(const x: TIffParams): Int64;
+begin
+  if x.kind = ikPBM then Result := x.rb * x.h else Result := x.rb * x.h * x.planes;
+end;
+
+function ParseIff(const d: TBytes; out L: TRasterLayout): TParseStatus;
+var p, sz, used, need: Int64; x: TIffParams; isBody: Boolean;
+begin
+  L.Clear;
+  if (Length(d) < 12) or (d[0] <> Ord('F')) or (d[1] <> Ord('O')) or (d[2] <> Ord('R')) or (d[3] <> Ord('M')) then Exit(psNotThis);
+  { the body: BODY (ILBM, PBM) or ABIT (ACBM) }
+  p := 12;
+  while True do begin
+    if p + 8 > Length(d) then Exit(psNotThis);
+    sz := U32BE(d, p + 4);
+    isBody := ((d[p] = Ord('B')) and (d[p + 1] = Ord('O')) and (d[p + 2] = Ord('D')) and (d[p + 3] = Ord('Y')))
+      or ((d[p] = Ord('A')) and (d[p + 1] = Ord('B')) and (d[p + 2] = Ord('I')) and (d[p + 3] = Ord('T')));
+    if isBody then Break;
+    Inc(p, 8 + sz + (sz and 1));
+  end;
+  if not IffParams(d, 0, p + 8, x) then Exit(psUnsupported);
+  if p + 8 > MAX_TEXT_HEADER then Exit(psUnsupported);
+  L.format := rfIFF; L.coding := CODING_ILBM;
+  L.width := x.rb * 8; L.height := x.h; L.bigEndian := True;
+  case x.kind of
+    ikPBM: begin L.width := x.rb; L.channels := 1; L.bits := 8; end;
+  else
+    { 24, 32 planes: 8 a channel }
+    if x.planes > 8 then begin L.channels := x.planes div 8; L.bits := 8; end
+    else begin L.channels := 1; L.bits := 8; end;
+  end;
+  L.maxval := 255;
+  L.dataOffset := p + 8;
+  Result := SizeRows(L, High(Int64) shr 2);
+  if Result <> psOk then begin L.format := rfNone; Exit; end;
+  need := IffDecodedLength(x);
+  if need > MAX_RAW then begin L.format := rfNone; Exit(psUnsupported); end;
+  if x.compression = 1 then begin
+    Result := PackBitsLength(d, L.dataOffset, need, used);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+  end else begin
+    used := need;
+    if used > Length(d) - L.dataOffset then begin L.format := rfNone; Exit(psTruncated); end;
+  end;
+  L.dataLength := used;
+end;
+
+{ the planes (dec: as decoded) <-> pixels }
+procedure IffPlanes(const x: TIffParams; var dec, raw: TBytes; toPixels: Boolean);
+var y, xx, p, ch: Integer; o, line, row: Int64; v, bit: Integer;
+begin
+  if x.kind = ikPBM then begin
+    if toPixels then raw := Copy(dec, 0, Length(dec)) else dec := Copy(raw, 0, Length(raw));
+    Exit;
+  end;
+  line := x.rb * 8;
+  if x.planes > 8 then ch := x.planes div 8 else ch := 1;
+  for y := 0 to x.h - 1 do
+    for p := 0 to x.planes - 1 do begin
+      if x.kind = ikACBM then row := (Int64(p) * x.h + y) * x.rb else row := (Int64(y) * x.planes + p) * x.rb;
+      bit := p and 7;
+      for xx := 0 to line - 1 do begin
+        if ch = 1 then o := Int64(y) * line + xx else o := (Int64(y) * line + xx) * ch + p shr 3;
+        if toPixels then begin
+          v := (dec[row + xx shr 3] shr (7 - (xx and 7))) and 1;
+          raw[o] := raw[o] or (v shl bit);
+        end else if ((raw[o] shr bit) and 1) <> 0 then
+          dec[row + xx shr 3] := dec[row + xx shr 3] or (1 shl (7 - (xx and 7)));
+      end;
+    end;
+end;
+
+function IffScan(const d: TBytes; first: SizeInt; const x: TIffParams; const L: TRasterLayout;
+                 out raw, side: TBytes; out used: Int64): Boolean;
+var dec: TBytes; need: Int64;
+begin
+  raw := nil; side := nil; used := 0;
+  need := IffDecodedLength(x);
+  if x.compression = 1 then begin
+    Result := PackBitsScan(d, first, need, x.rb, dec, side, used) = psOk;
+    if not Result then Exit;
+  end else begin
+    if first + need > Length(d) then Exit(False);
+    dec := Copy(d, first, need); used := need;
+  end;
+  SetLength(raw, L.rowBytes * L.height);
+  IffPlanes(x, dec, raw, True);
+  Result := True;
+end;
+
+function IffRebuild(const raw, side: TBytes; const x: TIffParams; usedLimit: Int64; out coded: TBytes): Boolean;
+var dec, r: TBytes; need: Int64;
+begin
+  coded := nil;
+  need := IffDecodedLength(x);
+  dec := nil; SetLength(dec, need);
+  r := raw;
+  IffPlanes(x, dec, r, False);
+  if x.compression = 1 then Result := PackBitsRebuild(dec, side, x.rb, usedLimit, coded)
+  else begin coded := dec; Result := Length(coded) = usedLimit; end;
 end;
 
 end.

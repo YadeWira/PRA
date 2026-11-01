@@ -374,6 +374,9 @@ begin
     rfVICAR: Result := '.vic';
     rfDICOM: Result := '.dcm';
     rfEXR: Result := '.exr';
+    rfTIFF: Result := '.tif';
+    rfPSD: Result := '.psd';
+    rfIFF: Result := '.iff';
   end;
 end;
 

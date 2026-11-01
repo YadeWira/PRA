@@ -130,6 +130,20 @@ type
   end;
 
 
+{ ---------- PackBits (TIFF 32773, PSD, IFF ILBM's ByteRun1) ---------- }
+
+{ A header byte n: 0..127, n + 1 bytes as they are; -127..-1, the next byte
+  1 - n times; -128 nothing (left: psUnsupported). The decoded bytes
+  (count of them, lines of lineLen, which packets may cross or not) at
+  d[first..]: the bytes, the packets' choices coded (side), the coded
+  length. }
+function PackBitsScan(const d: TBytes; first: SizeInt; count, lineLen: Int64;
+                      out raw, side: TBytes; out used: Int64): TParseStatus;
+function PackBitsLength(const d: TBytes; first: SizeInt; count: Int64; out used: Int64): TParseStatus;
+function PackBitsRebuild(const raw, side: TBytes; lineLen, usedLimit: Int64; out coded: TBytes): Boolean;
+{ a packet holds at most 128 bytes in 2 }
+function PackBitsFits(count, available: Int64): Boolean;
+
 implementation
 
 
@@ -1057,6 +1071,138 @@ begin
       end;
     end;
   until t.kind in [BK_EOB, BK_STOP];
+  Result := o = usedLimit;
+end;
+
+
+{ ---------- PackBits ---------- }
+
+function PackBitsFits(count, available: Int64): Boolean;
+begin
+  Result := (count >= 1) and (count <= MAX_RAW) and (available >= 0) and ((count + 127) div 128 * 2 <= available);
+end;
+
+{ the packet at d[p]: count bytes decoded, a run or not, its size; False
+  when cut short or a no-op }
+function ReadPackBits(const d: TBytes; p: SizeInt; out count, isRun, size: Integer): Boolean;
+var n: Integer;
+begin
+  count := 0; isRun := 0; size := 0;
+  if p >= Length(d) then Exit(False);
+  n := d[p];
+  if n < 128 then begin count := n + 1; size := count + 1; end
+  else if n > 128 then begin count := 257 - n; isRun := 1; size := 2; end
+  else Exit(False);
+  Result := p + size <= Length(d);
+end;
+
+function PackBitsLength(const d: TBytes; first: SizeInt; count: Int64; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; c, r, size: Integer;
+begin
+  used := 0;
+  if (count < 1) or (first > Length(d)) then Exit(psMalformed);
+  p := first; n := 0;
+  while n < count do begin
+    if not ReadPackBits(d, p, c, r, size) then begin
+      if (p < Length(d)) and (d[p] = 128) then Exit(psUnsupported);
+      Exit(psTruncated);
+    end;
+    if n + c > count then Exit(psMalformed);       { a packet past the end }
+    Inc(p, size); Inc(n, c);
+  end;
+  used := p - first;
+  Result := psOk;
+end;
+
+{ one packet's choices, both ways. Contexts: the run at n (in the line and
+  past it), the literal a usual writer makes (up to the next run of 3, or
+  of 2), the previous packet. }
+procedure CodePackBits(var pc: TPacketCoder; const raw: TBytes; n, total, lineLen: Int64;
+                       var prevRun: Integer; var isRun, count: Integer);
+var er, erLine, lineRem, lit, lit2, cap, ctx, k: Integer;
+begin
+  lineRem := lineLen - n mod lineLen;
+  er := ByteRunAt(raw, n, total, 128);
+  if er > lineRem then erLine := lineRem else erLine := er;
+  ctx := BmpBucket(er) + 8 * BmpBucket(erLine) + 64 * prevRun + 128 * Ord(lineRem = 1);
+  isRun := pc.Bit(ctx, isRun);
+  if isRun <> 0 then begin
+    ctx := 512 + BmpBucket(er) + 8 * Ord(er = erLine);
+    if pc.Bit(ctx, Ord(count = erLine)) <> 0 then count := erLine
+    else if (er <> erLine) and (pc.Bit(ctx + 16, Ord(count = er)) <> 0) then count := er
+    else count := pc.Tree(1024, count - 1, 7) + 1;
+  end else begin
+    { the literal up to the next run of 3 (and of 2), in the line }
+    cap := lineRem; if cap > 128 then cap := 128;
+    if cap > total - n then cap := total - n;
+    lit := 1; lit2 := 0;
+    while lit < cap do begin
+      k := ByteRunAt(raw, n + lit, total, 3);
+      if (lit2 = 0) and (k >= 2) then lit2 := lit;
+      if k >= 3 then Break;
+      Inc(lit);
+    end;
+    if lit2 = 0 then lit2 := lit;
+    ctx := 560 + BmpBucket(lit) + 8 * Ord(lit = cap);
+    if pc.Bit(ctx, Ord(count = lit)) <> 0 then count := lit
+    else if (lit2 <> lit) and (pc.Bit(ctx + 16, Ord(count = lit2)) <> 0) then count := lit2
+    else count := pc.Tree(1536, count - 1, 7) + 1;
+  end;
+  prevRun := isRun;
+end;
+
+function PackBitsScan(const d: TBytes; first: SizeInt; count, lineLen: Int64;
+                      out raw, side: TBytes; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; c, r, size, k, prevRun, isRun, cnt: Integer; pc: TPacketCoder;
+begin
+  raw := nil; side := nil;
+  Result := PackBitsLength(d, first, count, used);
+  if Result <> psOk then Exit;
+  if lineLen < 1 then Exit(psMalformed);
+  SetLength(raw, count);
+  p := first; n := 0;
+  while n < count do begin
+    ReadPackBits(d, p, c, r, size);
+    if r <> 0 then for k := 0 to c - 1 do raw[n + k] := d[p + 1]
+    else for k := 0 to c - 1 do raw[n + k] := d[p + 1 + k];
+    Inc(p, size); Inc(n, c);
+  end;
+  pc.Init(True, nil);
+  p := first; n := 0; prevRun := 0;
+  while n < count do begin
+    ReadPackBits(d, p, c, r, size);
+    isRun := r; cnt := c;
+    CodePackBits(pc, raw, n, count, lineLen, prevRun, isRun, cnt);
+    Inc(p, size); Inc(n, c);
+  end;
+  side := pc.enc.Finish;
+end;
+
+function PackBitsRebuild(const raw, side: TBytes; lineLen, usedLimit: Int64; out coded: TBytes): Boolean;
+var pc: TPacketCoder; n, total: Int64; o: SizeInt; prevRun, isRun, cnt, k: Integer;
+begin
+  coded := nil; Result := False;
+  total := Length(raw);
+  if (lineLen < 1) or (usedLimit < 0) then Exit;
+  SetLength(coded, usedLimit);
+  pc.Init(False, side);
+  n := 0; o := 0; prevRun := 0;
+  while n < total do begin
+    isRun := 0; cnt := 1;
+    CodePackBits(pc, raw, n, total, lineLen, prevRun, isRun, cnt);
+    if (cnt < 1) or (cnt > 128) or (n + cnt > total) then Exit;
+    if isRun <> 0 then begin
+      if (cnt < 2) or (o + 2 > usedLimit) then Exit;
+      for k := 1 to cnt - 1 do if raw[n + k] <> raw[n] then Exit;   { only a damaged side }
+      coded[o] := 257 - cnt; coded[o + 1] := raw[n]; Inc(o, 2);
+    end else begin
+      if o + 1 + cnt > usedLimit then Exit;
+      coded[o] := cnt - 1;
+      for k := 0 to cnt - 1 do coded[o + 1 + k] := raw[n + k];
+      Inc(o, 1 + cnt);
+    end;
+    Inc(n, cnt);
+  end;
   Result := o = usedLimit;
 end;
 

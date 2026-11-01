@@ -671,3 +671,159 @@ def exr(name, names, ptype, w, h, ymin, val):
     write(name, head + offs + blocks)
 exr('exr_half.exr', ['B', 'G', 'R'], 1, 25, 14, 5, lambda x, y, c: smooth(x, y, c, 255) / 64.0)
 exr('exr_float.exr', ['Y', 'Z'], 2, 16, 9, 0, lambda x, y, c: smooth(x, y, c, 1000) / 9.0)
+
+# ---------- containers: TIFF, PSD, IFF ----------
+out = os.path.join(root, 'cont'); os.makedirs(out, exist_ok=True)
+
+def packbits(data, linelen, randomly=False):
+    o = bytearray()
+    for s in range(0, len(data), linelen):
+        line = data[s:s + linelen]; i = 0
+        while i < len(line):
+            r = 1
+            while i + r < len(line) and r < 128 and line[i + r] == line[i]: r += 1
+            if randomly and r > 2: r = 2 + rand() % (r - 1)
+            if r >= 2:
+                o += bytes([257 - r, line[i]]); i += r; continue
+            j = i + 1
+            while j < len(line) and j - i < 128 and not (j + 1 < len(line) and line[j] == line[j + 1]): j += 1
+            if randomly: j = i + 1 + rand() % (j - i)
+            o += bytes([j - i - 1]) + line[i:j]; i = j
+    return bytes(o)
+
+# TIFF: entries (tag, type, values); strips or tiles laid where asked
+def tiff(name, be, entries_fn, big=False):
+    e = '>' if be else '<'
+    data, entries = entries_fn()
+    head_len = 16      # the classic header in 8, then 8 zero bytes: data offsets from 16 either way
+    blob = bytearray(head_len) + data
+    def put(fmt, v): return struct.pack(e + fmt, v)
+    tsz = {3: 2, 4: 4, 16: 8}
+    ents = []; extra = bytearray()
+    ifd_at = len(blob)
+    n = len(entries)
+    es = 20 if big else 12
+    after = ifd_at + (8 if big else 2) + n * es + (8 if big else 4)
+    for tag, typ, vals in sorted(entries):
+        raw = b''.join(put({2: 'H', 4: 'I', 8: 'Q'}[tsz[typ]], v) for v in vals)
+        inl = 8 if big else 4
+        if len(raw) <= inl: val = raw.ljust(inl, b'\0')
+        else: val = put('Q' if big else 'I', after + len(extra)); extra += raw + (b'\0' if len(raw) & 1 else b'')
+        ents.append(put('H', tag) + put('H', typ) + put('Q' if big else 'I', len(vals)) + val)
+    ifd = put('Q' if big else 'H', n) + b''.join(ents) + put('Q' if big else 'I', 0)
+    blob += ifd + extra
+    if big: blob[0:16] = (b'MM' if be else b'II') + put('H', 43) + put('H', 8) + put('H', 0) + put('Q', ifd_at)
+    else: blob[0:8] = (b'MM' if be else b'II') + put('H', 42) + put('I', ifd_at)
+    write(name, bytes(blob))
+
+def rgb_rows(w, h, two=False):
+    return [b''.join((struct.pack('>H', smooth(x, y, c, 65535)) if two else bytes([smooth(x, y, c, 255)])) for x in range(w) for c in range(3)) for y in range(h)]
+
+def tiff_strips(w, h, rps, rowfn, spp, bps, comp=1, planar=1, gap=0, be=False):
+    def fn():
+        data = bytearray(); offs = []; cnts = []
+        planes = spp if planar == 2 else 1
+        for p in range(planes):
+            for s in range(0, h, rps):
+                rows = b''.join(rowfn(y, p) for y in range(s, min(h, s + rps)))
+                if comp == 32773: rows = packbits(rows, len(rowfn(0, p)))
+                offs.append(16 + len(data)); cnts.append(len(rows)); data += rows + bytes(gap)
+        ents = [(256, 3, [w]), (257, 3, [h]), (258, 3, [bps] * spp), (259, 3, [comp]), (262, 3, [2 if spp >= 3 else 1]),
+                (273, 4, offs), (277, 3, [spp]), (278, 3, [rps]), (279, 4, cnts), (284, 3, [planar])]
+        return bytes(data), ents
+    return fn
+
+w, h = 37, 23
+rr = rgb_rows(w, h)
+tiff('tiff_rgb_strips.tif', False, tiff_strips(w, h, 5, lambda y, p: rr[y], 3, 8))
+rr16 = rgb_rows(21, 13, True)
+tiff('tiff_rgb16_mm.tif', True, tiff_strips(21, 13, 4, lambda y, p: rr16[y], 3, 16, be=True))
+gray = [bytes(((x // 5) * 30 + (y // 3) * 7) % 256 if (x + y) % 9 else 200 for x in range(53)) for y in range(31)]
+tiff('tiff_packbits.tif', False, tiff_strips(53, 31, 8, lambda y, p: gray[y], 1, 8, comp=32773))
+tiff('tiff_planar_gap.tif', True, tiff_strips(29, 17, 17, lambda y, p: bytes(smooth(x, y, p, 255) for x in range(29)), 3, 8, planar=2, gap=3))
+def tiles():
+    tw = th = 16; W, H = 40, 24; data = bytearray(); offs = []; cnts = []
+    for ty in range(0, H, th):
+        for tx in range(0, W, tw):
+            t = b''.join(bytes(smooth(tx + x, ty + y, 0, 255) for x in range(tw)) for y in range(th))
+            offs.append(16 + len(data)); cnts.append(len(t)); data += t
+    ents = [(256, 3, [W]), (257, 3, [H]), (258, 3, [8]), (259, 3, [1]), (262, 3, [1]), (277, 3, [1]),
+            (322, 3, [tw]), (323, 3, [th]), (324, 4, offs), (325, 4, cnts)]
+    return bytes(data), ents
+tiff('tiff_tiles.tif', False, tiles)
+tiff('tiff_big.tif', False, tiff_strips(19, 11, 11, lambda y, p: rgb_rows(19, 11)[y], 3, 8), big=True)
+
+# PSD: a raw composite; a layered one, RLE channels, a mask, an RLE composite
+def psd(name, w, h, ch, layers, rle):
+    head = b'8BPS' + struct.pack('>H', 1) + bytes(6) + struct.pack('>HIIHH', ch, h, w, 8, 3)
+    head += struct.pack('>I', 0) + struct.pack('>I', 12) + b'8BIM\x03\xed\x00\x00\x00\x00\x00\x00'
+    def plane_data(planes, rows, width, use_rle):
+        if not use_rle: return struct.pack('>H', 0) + b''.join(planes)
+        rows_enc = [packbits(pl[y * width:(y + 1) * width], width) for pl in planes for y in range(rows)]
+        return struct.pack('>H', 1) + b''.join(struct.pack('>H', len(r)) for r in rows_enc) + b''.join(rows_enc)
+    recs = b''; chdata = b''
+    for (top, left, lh, lw, mask) in layers:
+        chans = [(c, bytes(smooth(x + c * 3, y, c, 255) for y in range(lh) for x in range(lw))) for c in (-1, 0, 1, 2)]
+        if mask: chans.append((-2, bytes(255 if (x - mask[1] // 2) ** 2 + (y - mask[0] // 2) ** 2 < 40 else 0 for y in range(mask[0]) for x in range(mask[1]))))
+        recs += struct.pack('>iiiiH', top, left, top + lh, left + lw, len(chans))
+        datas = []
+        for cid, pl in chans:
+            ph, pw = (mask[0], mask[1]) if cid == -2 else (lh, lw)
+            dd = plane_data([pl], ph, pw, rle); datas.append(dd)
+            recs += struct.pack('>hI', cid, len(dd))
+        maskdata = struct.pack('>I', 20) + struct.pack('>iiii', top, left, top + mask[0], left + mask[1]) + b'\0\0\0\0' if mask else struct.pack('>I', 0)
+        extra = maskdata + struct.pack('>I', 0) + bytes([4]) + b'name'[:3] + b'\0' * 0
+        extra = maskdata + struct.pack('>I', 0) + b'\x03abc'
+        recs += b'8BIMnorm' + bytes([255, 0, 0, 0]) + struct.pack('>I', len(extra)) + extra
+        chdata += b''.join(datas)
+    li = struct.pack('>h', len(layers)) + recs + chdata
+    if len(li) & 1: li += b'\0'
+    lm = (struct.pack('>I', len(li)) + li + struct.pack('>I', 0)) if layers else b''
+    head += struct.pack('>I', len(lm)) + lm
+    comp = [bytes(smooth(x, y, c, 255) for y in range(h) for x in range(w)) for c in range(ch)]
+    write(name, head + plane_data(comp, h, w, rle))
+psd('psd_raw.psd', 31, 19, 3, [], False)
+psd('psd_layers_rle.psd', 33, 21, 3, [(2, 3, 12, 15, None), (5, 1, 9, 10, (8, 6))], True)
+# one layer the size of the image, raw: its channels are the composite's
+# planes byte for byte (the layer's pixels are the composite's: same smooth())
+def psd_dup(name, w, h):
+    comp = [bytes(smooth(x, y, c, 255) for y in range(h) for x in range(w)) for c in range(3)]
+    recs = struct.pack('>iiiiH', 0, 0, h, w, 3)
+    for c in range(3): recs += struct.pack('>hI', c, 2 + w * h)
+    extra = struct.pack('>I', 0) + struct.pack('>I', 0) + b'\x03abc'
+    recs += b'8BIMnorm' + bytes([255, 0, 0, 0]) + struct.pack('>I', len(extra)) + extra
+    li = struct.pack('>h', 1) + recs + b''.join(struct.pack('>H', 0) + comp[c] for c in range(3))
+    if len(li) & 1: li += b'\0'
+    lm = struct.pack('>I', len(li)) + li + struct.pack('>I', 0)
+    head = b'8BPS' + struct.pack('>H', 1) + bytes(6) + struct.pack('>HIIHH', 3, h, w, 8, 3) + struct.pack('>I', 0) + struct.pack('>I', 0)
+    write(name, head + struct.pack('>I', len(lm)) + lm + struct.pack('>H', 0) + b''.join(comp))
+psd_dup('psd_dup.psd', 28, 18)
+
+# IFF: ILBM 5 planes ByteRun1, PBM, ACBM, ILBM 24 planes uncompressed
+def iff(name, typ, w, h, planes, comp, body, cmap=True):
+    bmhd = struct.pack('>HHhhBBBBHBBhh', w, h, 0, 0, planes, 0, comp, 0, 0, 10, 11, w, h)
+    chunks = b'BMHD' + struct.pack('>I', 20) + bmhd
+    if cmap and planes <= 8:
+        cm = bytes((i * 37 + k * 11) % 256 for i in range(1 << min(planes, 8)) for k in range(3))
+        chunks += b'CMAP' + struct.pack('>I', len(cm)) + cm + (b'\0' if len(cm) & 1 else b'')
+    tag = b'ABIT' if typ == b'ACBM' else b'BODY'
+    chunks += tag + struct.pack('>I', len(body)) + body + (b'\0' if len(body) & 1 else b'')
+    write(name, b'FORM' + struct.pack('>I', 4 + len(chunks)) + typ + chunks)
+def bitplanes(w, h, planes, val, plane_major=False):
+    rb = (w + 15) // 16 * 2; rows = {}
+    for y in range(h):
+        for p in range(planes):
+            bits = [(val(x, y) >> p) & 1 for x in range(w)] + [0] * (rb * 8 - w)
+            rows[(y, p)] = bytes(sum(bits[i * 8 + k] << (7 - k) for k in range(8)) for i in range(rb))
+    order = [(y, p) for p in range(planes) for y in range(h)] if plane_major else [(y, p) for y in range(h) for p in range(planes)]
+    return b''.join(rows[k] for k in order), rb
+blobv = lambda x, y: ((x // 4) + (y // 3)) % 32 if (x - 18) ** 2 + (y - 10) ** 2 < 90 else 3
+b5, rb = bitplanes(37, 21, 5, blobv)
+iff('ilbm_5planes.iff', b'ILBM', 37, 21, 5, 1, packbits(b5, rb))
+pw = 30
+pbm_rows = b''.join(bytes(smooth(x, y, 0, 255) for x in range(pw)) for y in range(14))
+iff('pbm_chunky.lbm', b'PBM ', pw, 14, 8, 1, packbits(pbm_rows, pw))
+b4, rb = bitplanes(25, 13, 4, lambda x, y: (x + 2 * y) % 16, plane_major=True)
+iff('acbm_4planes.acbm', b'ACBM', 25, 13, 4, 0, b4)
+b24, rb = bitplanes(20, 9, 24, lambda x, y: (smooth(x, y, 0, 255)) | (smooth(x, y, 1, 255) << 8) | (smooth(x, y, 2, 255) << 16))
+iff('ilbm_24.iff', b'ILBM', 20, 9, 24, 0, b24, cmap=False)

@@ -110,11 +110,11 @@ begin
 end;
 
 var
-  dirB, dirH, dirO, dirM, dirS: string; parts: TParts; fmt: TRasterFormat; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
+  dirB, dirH, dirO, dirM, dirS, dirC: string; parts: TParts; fmt: TRasterFormat; d, rgbe, modes: TBytes; L: TRasterLayout; st: TParseStatus; used: Int64;
   i, k, bad, oks, bpp, planes: Integer; samples: array of TBytes; hdrText: string; dd: TBytes;
 begin
   cells := 0; failures := 0; seed := 88172645;
-  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3); dirM := ParamStr(4); dirS := ParamStr(5);
+  dirB := ParamStr(1); dirH := ParamStr(2); dirO := ParamStr(3); dirM := ParamStr(4); dirS := ParamStr(5); dirC := ParamStr(6);
 
   Writeln('BMP samples');
   d := ReadAll(dirB + '/graypal8.bmp'); st := ParseBmp(d, L);
@@ -519,6 +519,71 @@ begin
   end;
   Check(bad = 0, Format('12000 mutated DPX, Cineon, DICOM, EXR, VICAR, FITS: no exception, pixels inside (%d ok)', [oks]));
 
+  Writeln('containers');
+  d := ReadAll(dirC + '/tiff_rgb_strips.tif');
+  Check(Split(d, parts, fmt) and (fmt = rfTIFF) and Covers(d, parts) and (Kinds(parts) = 'bib')
+    and (parts[1].L.height = 23) and (parts[1].L.channels = 3), 'tiff_rgb_strips.tif: five strips, one image');
+  d := ReadAll(dirC + '/tiff_packbits.tif');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (Kinds(parts) = 'bib') and (parts[1].L.coding = CODING_PACKBITS),
+    'tiff_packbits.tif: PackBits strips, one image');
+  d := ReadAll(dirC + '/tiff_planar_gap.tif');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (Kinds(parts) = 'bibibib'), 'tiff_planar_gap.tif: three planes apart');
+  d := ReadAll(dirC + '/tiff_tiles.tif');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[1].L.width = 16) and (parts[1].L.height = 16 * 6),
+    'tiff_tiles.tif: six tiles stacked');
+  d := ReadAll(dirC + '/tiff_big.tif');
+  Check(Split(d, parts, fmt) and (fmt = rfTIFF) and Covers(d, parts) and (Kinds(parts) = 'bib'), 'tiff_big.tif: BigTIFF');
+  d := ReadAll(dirC + '/tiff_rgb16_mm.tif');
+  Check(Split(d, parts, fmt) and (parts[1].L.bits = 16) and parts[1].L.bigEndian, 'tiff_rgb16_mm.tif: 16 bits, big-endian');
+  Check(not Split(WithU32(ReadAll(dirC + '/tiff_rgb_strips.tif'), 4, 100000), parts, fmt), 'TIFF, its directory past the end: not split');
+  d := ReadAll(dirC + '/tiff_rgb_strips.tif');
+  dd := Copy(d, 0, Length(d)); dd[4] := 8; dd[5] := 0; dd[6] := 0; dd[7] := 0;
+  Check(not Split(dd, parts, fmt) or Covers(dd, parts), 'TIFF, its directory over its header: never outside the file');
+  d := ReadAll(dirC + '/psd_layers_rle.psd');
+  Check(Split(d, parts, fmt) and (fmt = rfPSD) and Covers(d, parts) and (Pos('iiii', Kinds(parts)) = 0)
+    and (parts[High(parts)].L.coding = CODING_PLANES_PACKBITS) and (parts[High(parts)].L.channels = 3),
+    'psd_layers_rle.psd: the layers'' channels, a mask, an interleaved composite');
+  d := ReadAll(dirC + '/psd_raw.psd');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[High(parts)].L.coding = CODING_PLANES),
+    'psd_raw.psd: a raw composite, its planes interleaved');
+  dd := Copy(d, 0, Length(d)); dd[4] := 0; dd[5] := 3;
+  Check(not Split(dd, parts, fmt), 'PSD of version 3: not split');
+  d := ReadAll(dirC + '/psd_dup.psd');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[High(parts)].L.channels = 1)
+    and (parts[High(parts)].len = parts[High(parts) - 2].len),
+    'psd_dup.psd: a layer that is the composite: its planes apart, to be copies');
+  d := ReadAll(dirC + '/ilbm_5planes.iff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.format = rfIFF) and (L.coding = CODING_ILBM) and (L.width = 48) and (L.channels = 1),
+    'ilbm_5planes.iff: five planes, ByteRun1, rows of 48 pixels');
+  d := ReadAll(dirC + '/ilbm_24.iff'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.channels = 3), 'ilbm_24.iff: 24 planes, three channels');
+  d := ReadAll(dirC + '/pbm_chunky.lbm'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.width = 30) and (L.coding = CODING_ILBM), 'pbm_chunky.lbm: PBM, bytes');
+  d := ReadAll(dirC + '/acbm_4planes.acbm'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.dataLength = 2 * 13 * 4 * 2), 'acbm_4planes.acbm: ACBM, whole planes');
+  dd := Copy(d, 0, Length(d)); dd[12 + 8 + 9] := 1;
+  Check(ParseIff(dd, L) = psUnsupported, 'ILBM with a mask plane: unsupported');
+  { mutated containers: never an exception, the parts always the whole file }
+  samples := nil; SetLength(samples, 5);
+  samples[0] := ReadAll(dirC + '/tiff_planar_gap.tif'); samples[1] := ReadAll(dirC + '/psd_layers_rle.psd');
+  samples[2] := ReadAll(dirC + '/tiff_big.tif'); samples[3] := ReadAll(dirC + '/ilbm_5planes.iff');
+  samples[4] := ReadAll(dirC + '/tiff_tiles.tif');
+  bad := 0; oks := 0;
+  for i := 1 to 10000 do begin
+    d := Copy(samples[i mod 5], 0, Length(samples[i mod 5]));
+    if i mod 5 = 0 then SetLength(d, Integer(Rand mod Cardinal(Length(d))));
+    for k := 1 to 1 + Integer(Rand mod 3) do
+      if Length(d) > 0 then d[Integer(Rand mod Cardinal(Min(Length(d), 1024)))] := Byte(Rand);
+    try
+      if Split(d, parts, fmt) then begin Inc(oks); if not Covers(d, parts) then Inc(bad); end
+      else if ParseAny(d, L) = psOk then
+        if (L.dataOffset + L.dataLength > Length(d)) or (L.dataLength < 1) then Inc(bad);
+    except
+      Inc(bad);
+    end;
+  end;
+  Check(bad = 0, Format('10000 mutated TIFF, PSD, IFF: no exception, the parts the whole file (%d split)', [oks]));
+
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
   Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
@@ -566,5 +631,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 173) then Halt(1);
+  if (failures > 0) or (cells < 192) then Halt(1);
 end.

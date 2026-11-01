@@ -123,7 +123,7 @@ function Hex(const x: array of Byte): string; var i: Integer;
 begin Result := ''; for i := 0 to High(x) do Result := Result + LowerCase(IntToHex(x[i], 2)); end;
 
 var
-  i, k, n, bad, raised: Integer; s, s2, back, dmg: TBytes; why: string; st: TDecodeStatus; ok: Boolean;
+  i, k, k2, n, bad, raised: Integer; s, s2, back, dmg: TBytes; why: string; st: TDecodeStatus; ok: Boolean;
   L: TRasterLayout; streams: array of TBytes; sr: TSearchRec;
 begin
   cells := 0; failures := 0; seed := 2463534242;
@@ -241,6 +241,16 @@ begin
       s2 := Copy(s, 0, Length(s)); s2[2] := 7;
       Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'parts: a part of kind 7: damaged');
     end;
+  { a PSD whose layer is its composite: the composite's planes are copies,
+    so the file costs about one image }
+  for k := 0 to High(samples) do
+    if names[k] = 'psd_dup.psd' then begin
+      Check(EncodeFile(samples[k], s, why) and (DecodeFile(s, Length(samples[k]), back) = dsOk) and Same(back, samples[k]),
+        Format('psd_dup.psd: back; %d -> %d', [Length(samples[k]), Length(s)]));
+      for k2 := 0 to High(samples) do
+        if names[k2] = 'psd_raw.psd' then Check(Length(s) < Length(samples[k2]) div 2 + 200,
+          'psd_dup.psd: the copies cost almost nothing');
+    end;
   { version 1 kept the header and the tail as they are: made by the code of
     then (f75c10f) from tests/other/tga_rgb24.tga, which has both }
   s2 := ReadAll('pas/tests/stream_v1_tga.bin');
@@ -296,5 +306,5 @@ begin
 
   Writeln('streams ', Hex(all.Final));
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 38) then Halt(1);
+  if (failures > 0) or (cells < 40) then Halt(1);
 end.

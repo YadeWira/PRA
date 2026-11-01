@@ -73,7 +73,7 @@ function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out
 
 implementation
 
-uses praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain, prasci;
+uses Math, praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain, prasci;
 
 { ---------- byte sink and source ---------- }
 
@@ -756,6 +756,7 @@ begin
   if Result = psNotThis then Result := ParseSgi(d, L);
   if Result = psNotThis then Result := ParseVips(d, L);
   if Result = psNotThis then Result := ParseDds(d, L);
+  if Result = psNotThis then Result := ParseIff(d, L);
   if Result = psNotThis then Result := ParseViff(d, L);
   if Result = psNotThis then Result := ParseDpx(d, L);
   if Result = psNotThis then Result := ParseCineon(d, L);
@@ -812,12 +813,14 @@ end;
 function SideCoded(const L: TRasterLayout): Boolean;
 begin
   Result := L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_PCX, CODING_SGI_RLE, CODING_PLANES,
-                         CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_EXR];
+                         CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_EXR, CODING_PACKBITS,
+                         CODING_PLANES_PACKBITS, CODING_ILBM];
 end;
 
 { the raw pixels and the coded choices of the coded pixels in d }
 function CodedScan(const d: TBytes; const L: TRasterLayout; out raw, side: TBytes): Boolean;
 var used: Int64; dec: TBytes; bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean;
+  ix: TIffParams;
 begin
   raw := nil; side := nil; Result := False;
   R := RawLayout(L);
@@ -837,6 +840,13 @@ begin
       used := L.dataLength;
       Result := ExrScan(d, L.dataOffset, L, raw);
     end;
+    CODING_PACKBITS: Result := PackBitsScan(d, L.dataOffset, R.dataLength, R.rowBytes, raw, side, used) = psOk;
+    CODING_ILBM: Result := IffParams(d, 0, L.dataOffset, ix) and IffScan(d, L.dataOffset, ix, R, raw, side, used);
+    CODING_PLANES_PACKBITS: begin
+      { the planes' rows: a channel's samples in a row }
+      Result := PackBitsScan(d, L.dataOffset, R.dataLength, R.rowBytes div L.channels, dec, side, used) = psOk;
+      if Result then raw := SgiToPixels(dec, L.width, L.height, L.channels, L.bits div 8);
+    end;
     CODING_PLANES: begin
       used := R.dataLength;
       Result := L.dataOffset + used <= Length(d);
@@ -854,7 +864,7 @@ end;
 { the coded pixels again (hdr: the file's header, which PCX needs) }
 function CodedRebuild(const hdr: TBytes; hdrFirst: SizeInt; const raw, side: TBytes; const L: TRasterLayout;
                       out coded: TBytes): Boolean;
-var bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64;
+var bpp, planes, bpl, lines: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64; ix: TIffParams;
 begin
   coded := nil; Result := False;
   R := RawLayout(L);
@@ -871,6 +881,11 @@ begin
     CODING_EXR:
       Result := ExrYMin(hdr, hdrFirst, Length(hdr) - hdrFirst, ymin) and ExrRebuild(raw, L.dataOffset, L, ymin, coded)
         and (Length(coded) = L.dataLength);
+    CODING_PACKBITS: Result := PackBitsRebuild(raw, side, R.rowBytes, L.dataLength, coded);
+    CODING_ILBM: Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and IffRebuild(raw, side, ix, L.dataLength, coded);
+    CODING_PLANES_PACKBITS:
+      Result := PackBitsRebuild(SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8), side,
+                                R.rowBytes div L.channels, L.dataLength, coded);
     CODING_PLANES: begin
       coded := SgiFromPixels(raw, L.width, L.height, L.channels, L.bits div 8);
       Result := Length(coded) = L.dataLength;
@@ -887,6 +902,7 @@ end;
   dataLength coded bytes at all; and do they agree with the header }
 function CodedFits(const hdr: TBytes; hdrFirst: SizeInt; const L: TRasterLayout): Boolean;
 var bpp, planes, bpl, lines, w, ch, bits: Integer; R: TRasterLayout; methodB, wordsBE: Boolean; ymin: Int64;
+  ix: TIffParams;
 begin
   R := RawLayout(L);
   case L.coding of
@@ -901,6 +917,20 @@ begin
       and Pack10Fits(L, L.dataLength) and (L.dataLength = Pack10Words(L.width, L.channels) * 4 * L.height);
     CODING_EXR: Result := ExrYMin(hdr, hdrFirst, Length(hdr) - hdrFirst, ymin) and ExrFits(L, L.dataLength)
       and (L.dataLength = L.height * (16 + L.width * L.channels * (L.bits div 8)));
+    CODING_PACKBITS: Result := (R.rowBytes >= 1) and PackBitsFits(R.dataLength, L.dataLength);
+    CODING_PLANES_PACKBITS: Result := (L.bits in [8, 16]) and PackBitsFits(R.dataLength, L.dataLength);
+    CODING_ILBM: begin
+      { the pixels have to be the ones the header's planes make }
+      Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and (L.bits = 8) and (L.height = ix.h)
+        and (IffDecodedLength(ix) <= MAX_RAW);
+      if Result then
+        if ix.kind = ikPBM then Result := (L.width = ix.rb) and (L.channels = 1)
+        else if ix.planes > 8 then Result := (L.width = ix.rb * 8) and (L.channels = ix.planes div 8)
+        else Result := (L.width = ix.rb * 8) and (L.channels = 1);
+      if Result then
+        if ix.compression = 1 then Result := PackBitsFits(IffDecodedLength(ix), L.dataLength)
+        else Result := L.dataLength = IffDecodedLength(ix);
+    end;
     CODING_PCX: begin
       { the pixels' layout has to be the one the header gives (PcxFromPixels
         reads them by it), and the decoded lines have to fit }
@@ -973,9 +1003,17 @@ begin
     rfDPX, rfCineon: if (flags and 8) <> 0 then h.L.coding := CODING_PACK10;
     rfFITS, rfVICAR, rfDICOM: if (flags and 8) <> 0 then h.L.coding := CODING_PLANES;
     rfEXR: h.L.coding := CODING_EXR;
+    rfTIFF: if (flags and 8) <> 0 then h.L.coding := CODING_PACKBITS;
+    rfIFF: h.L.coding := CODING_ILBM;
+    { PSD: PackBits or not, planes or not }
+    rfPSD:
+      if (flags and 8) <> 0 then begin
+        if h.L.channels > 1 then h.L.coding := CODING_PLANES_PACKBITS else h.L.coding := CODING_PACKBITS;
+      end else if h.L.channels > 1 then h.L.coding := CODING_PLANES;
   end;
   if ((flags and 8) <> 0) and not (h.L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE,
-                                                   CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10])
+                                                   CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10, CODING_PACKBITS,
+                                                   CODING_PLANES_PACKBITS])
      and not ((h.L.coding = CODING_PLANES) and (h.L.format in [rfFITS, rfVICAR, rfDICOM])) then Exit(dsBadStream);
   if SideCoded(h.L) then begin
     { the coded length within the cap, the image within what that length
@@ -989,6 +1027,9 @@ begin
       the others up to 4 channels of 1 to 16 bits }
     if h.L.coding = CODING_EXR then begin
       if (h.L.channels > MAX_CHANNELS) or not (h.L.bits in [16, 32]) or (((flags and 2) <> 0) <> (h.L.bits = 32)) then Exit(dsBadStream);
+    end else if h.L.coding in [CODING_PLANES, CODING_PLANES_PACKBITS] then begin
+      { planes: any channels (PSD's composite), 8 or 16 bits }
+      if (h.L.channels > MAX_CHANNELS) or not (h.L.bits in [8, 16]) then Exit(dsBadStream);
     end else if (h.L.channels > 4) or not (h.L.bits in [1, 2, 4, 8, 16]) then Exit(dsBadStream);
     if not CodedFits(h.hdr, 0, h.L) then Exit(dsBadStream);
     h.side := Copy(s, src.p, sideLen);
@@ -1270,7 +1311,8 @@ begin
   if L.bigEndian then flags := flags or 1;
   if L.isFloat then flags := flags or 2;
   if L.bottomUp then flags := flags or 4;
-  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10] then flags := flags or 8;
+  if L.coding in [CODING_TGA_RLE, CODING_SUN_RLE, CODING_SGI_RLE, CODING_BMP_RLE, CODING_PLAIN, CODING_PACK10,
+                  CODING_PACKBITS, CODING_PLANES_PACKBITS] then flags := flags or 8;
   if (L.coding = CODING_PLANES) and (L.format in [rfFITS, rfVICAR, rfDICOM]) then flags := flags or 8;
   o.Put(flags);
   o.PutVarint(L.maxval);
@@ -1365,12 +1407,17 @@ end;
 { ---------- files of several images ---------- }
 
 { Version 3: the count of parts (varint), then each: its kind, 1 B (0
-  bytes, 1 image), and either a section (the bytes, prabytes) or the
-  image's length in the file (varint), its stream's length (varint) and
-  its stream (version 2). An image that cannot be coded becomes bytes. }
+  bytes, 1 image, 2 a copy), and either a section (the bytes, prabytes),
+  or the image's length in the file (varint), its stream's length (varint)
+  and its stream (version 2), or the copy's length and where in the file
+  its bytes were already (varints). An image that cannot be coded becomes
+  bytes; a part the same as an earlier one, a copy (a PSD layer that is
+  its composite). }
 const
   PART_BYTES = 0;
   PART_IMAGE = 1;
+  PART_COPY = 2;        { its length, then where the same bytes are, earlier }
+  MIN_COPY = 64;
 
 type
   PTBytes = ^TBytes;
@@ -1379,7 +1426,7 @@ type
   it was coded) taken from the original instead of decoded again }
 function DecodeParts(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer;
                      orig: PTBytes = nil): TDecodeStatus;
-var src: TSource; n, k: SizeInt; len, slen, total: Int64; kind: Integer; part: TBytes; st: TDecodeStatus;
+var src: TSource; n, k: SizeInt; len, slen, total, from: Int64; kind: Integer; part: TBytes; st: TDecodeStatus;
 begin
   d := nil;
   src.b := s; src.p := 1; src.ok := True;
@@ -1390,9 +1437,13 @@ begin
   for k := 1 to n do begin
     kind := src.Get;
     len := src.GetVarint(High(Int64) shr 1);
-    if not src.ok or (kind > PART_IMAGE) then Exit(dsBadStream);
+    if not src.ok or (kind > PART_COPY) then Exit(dsBadStream);
     if len > maxOut - total then Exit(dsTooBig);
-    if kind = PART_BYTES then begin
+    if kind = PART_COPY then begin
+      from := src.GetVarint(total);
+      if not src.ok or (len < 1) or (len > total - from) then begin d := nil; Exit(dsBadStream); end;
+      part := Copy(d, from, len);
+    end else if kind = PART_BYTES then begin
       if not GetSection(src, IMAGE_STREAM, len, part) then Exit(dsBadStream);
     end else begin
       slen := src.GetVarint(Length(s) - src.p);
@@ -1407,32 +1458,55 @@ begin
       if Length(part) <> len then begin d := nil; Exit(dsBadStream); end;
       Inc(src.p, slen);
     end;
-    { the parts joined: grown a part at a time, each within the cap }
-    SetLength(d, total + len);
+    { the parts joined: room grown by halves, each part within the cap }
+    if total + len > Length(d) then SetLength(d, Max(total + len, Min(maxOut, Length(d) + Length(d) div 2)));
     if len > 0 then Move(part[0], d[total], len);
     Inc(total, len);
   end;
   if src.p <> Length(s) then begin d := nil; Exit(dsBadStream); end;
+  SetLength(d, total);
   Result := dsOk;
 end;
 
 function EncodeParts(const d: TBytes; const parts: TParts; out s: TBytes; out why: string; threads: Integer): Boolean;
 var
-  o: TSink; k, j, n, images: Integer; img, back: TBytes; w: string;
-  subs: array of TBytes; first, len: array of Int64;
+  o: TSink; k, j, n, images, m: Integer; img, back: TBytes; w: string;
+  subs: array of TBytes; first, len, copyFrom: array of Int64;
+  hashes: array of QWord; h: QWord; q: Int64;
 begin
+  { the same bytes as an earlier part (a hash of each, then the bytes
+    compared): a copy }
+  hashes := nil; SetLength(hashes, Length(parts));
+  for k := 0 to High(parts) do begin
+    h := 1469598103934665603;
+    {$push}{$Q-}{$R-}
+    q := parts[k].first;
+    while q < parts[k].first + parts[k].len do begin h := (h xor d[q]) * 1099511628211; Inc(q); end;
+    {$pop}
+    hashes[k] := h;
+  end;
   { each image coded; one whose stream is not smaller than it (a mipmap of
     a few pixels) becomes bytes, and bytes next to bytes are one part }
-  subs := nil; first := nil; len := nil; n := 0;
+  subs := nil; first := nil; len := nil; copyFrom := nil; n := 0;
   SetLength(subs, Length(parts)); SetLength(first, Length(parts)); SetLength(len, Length(parts));
+  SetLength(copyFrom, Length(parts));
   for k := 0 to High(parts) do begin
-    subs[n] := nil;
+    subs[n] := nil; copyFrom[n] := -1;
+    if parts[k].len >= MIN_COPY then
+      for m := 0 to k - 1 do
+        if (hashes[m] = hashes[k]) and (parts[m].len = parts[k].len)
+           and CompareMem(@d[parts[m].first], @d[parts[k].first], parts[k].len) then begin
+          copyFrom[n] := parts[m].first; Break;
+        end;
+    if copyFrom[n] >= 0 then begin
+      first[n] := parts[k].first; len[n] := parts[k].len; Inc(n); Continue;
+    end;
     if parts[k].kind = pkImage then begin
       img := Copy(d, parts[k].first, parts[k].len);
       if not EncodeImage(img, parts[k].L, subs[n], w, threads) or (Length(subs[n]) >= parts[k].len) then
         subs[n] := nil;
     end;
-    if (subs[n] = nil) and (n > 0) and (subs[n - 1] = nil) then Inc(len[n - 1], parts[k].len)
+    if (subs[n] = nil) and (n > 0) and (subs[n - 1] = nil) and (copyFrom[n - 1] < 0) then Inc(len[n - 1], parts[k].len)
     else begin first[n] := parts[k].first; len[n] := parts[k].len; Inc(n); end;
   end;
   images := 0;
@@ -1440,7 +1514,12 @@ begin
   o.Put(PARTS_STREAM);
   o.PutVarint(n);
   for j := 0 to n - 1 do
-    if subs[j] <> nil then begin
+    if copyFrom[j] >= 0 then begin
+      o.Put(PART_COPY);
+      o.PutVarint(len[j]);
+      o.PutVarint(copyFrom[j]);
+      Inc(images);
+    end else if subs[j] <> nil then begin
       o.Put(PART_IMAGE);
       o.PutVarint(len[j]);
       o.PutVarint(Length(subs[j]));

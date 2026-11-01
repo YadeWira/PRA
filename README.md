@@ -23,7 +23,8 @@ raw and run-length, given back byte for byte whoever wrote it), farbfeld,
 WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS, and files of several
 images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; and film and
 science: DPX, Cineon (10 bits packed too), FITS, VICAR, uncompressed DICOM
-and uncompressed OpenEXR; see
+and uncompressed OpenEXR; and containers: TIFF and BigTIFF (uncompressed
+and PackBits), PSD and PSB (layers too), IFF ILBM, PBM and ACBM; see
 [doc/FORMATS.md](doc/FORMATS.md) for what comes next.
 
 On the Netpbm, BMP and HDR files of a local corpus that both give back,
@@ -39,6 +40,7 @@ Status: in development. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/PO
 | Netpbm parser (P1-P7, PF/Pf) | `pas/prapnm.pas` | done |
 | plain Netpbm text, any writer | `pas/praplain.pas` | done |
 | DPX, Cineon, FITS, VICAR, DICOM, OpenEXR | `pas/prasci.pas` | done |
+| TIFF, PSD (parts), IFF ILBM (bitplanes), PackBits | `pas/praparts.pas`, `pas/praother.pas`, `pas/prarle.pas` | done |
 | BMP and Radiance HDR parsers | `pas/prabmp.pas`, `pas/prahdr.pas` | done |
 | farbfeld, TGA, Sun Raster, WBMP, PCX, SGI, XWD, MTV, VIFF, VIPS, DDS | `pas/praother.pas` | done |
 | run-length files, any writer | `pas/prarle.pas` | done (TGA, PCX, Sun Raster, SGI, BMP) |
