@@ -50,6 +50,10 @@ section     length (varint); when not 0, then 1 B: 0 the bytes as they are,
 Versions 1 and 2 (the model before the match models, never released) are
 refused: a stream of another model cannot be decoded by this one.
 
+Version 4 (an image) and version 3 (several) are those of PRA 0.1.0, the
+first release: from there on a stream is never changed, and a later PRA
+reads every version it has released.
+
 ## Stream of parts, version 3
 
 A file of several images (ICO, CUR, DCX, Netpbm images in a row, a DDS
