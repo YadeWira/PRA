@@ -827,6 +827,37 @@ b4, rb = bitplanes(25, 13, 4, lambda x, y: (x + 2 * y) % 16, plane_major=True)
 iff('acbm_4planes.acbm', b'ACBM', 25, 13, 4, 0, b4)
 b24, rb = bitplanes(20, 9, 24, lambda x, y: (smooth(x, y, 0, 255)) | (smooth(x, y, 1, 255) << 8) | (smooth(x, y, 2, 255) << 16))
 iff('ilbm_24.iff', b'ILBM', 20, 9, 24, 0, b24, cmap=False)
+# RGBN and RGB8 (Impulse): a pixel and its count, runs across rows; counts
+# inline, in a byte (the inline count 0) and in a word (the byte 0 too)
+def impulse(w, h, val, rgb8, forms):
+    px = [val(x, y) for y in range(h) for x in range(w)]
+    out = bytearray(); i = 0; k = 0
+    cmax = 127 if rgb8 else 7
+    while i < len(px):
+        n = 1
+        while i + n < len(px) and px[i + n] == px[i] and n < 65535: n += 1
+        f = forms[k % len(forms)]; k += 1
+        if f == 0 and n > cmax: n = cmax
+        if f == 1 and n > 255: n = 255
+        r, g, b, gl = px[i]
+        inl = n if f == 0 else 0
+        if rgb8: out += bytes((r, g, b, (gl << 7) | inl))
+        else: out += struct.pack('>H', (r << 12) | (g << 8) | (b << 4) | (gl << 3) | inl)
+        if f == 1: out.append(n)
+        if f == 2: out += b'\0' + struct.pack('>H', n)
+        i += n
+    return bytes(out)
+def iff_rgb(name, typ, w, h, body):
+    bmhd = struct.pack('>HHhhBBBBHBBhh', w, h, 0, 0, 13 if typ == b'RGBN' else 25, 0, 4, 0, 0, 10, 11, w, h)
+    chunks = b'BMHD' + struct.pack('>I', 20) + bmhd
+    chunks += b'BODY' + struct.pack('>I', len(body)) + body + (b'\0' if len(body) & 1 else b'')
+    write(name, b'FORM' + struct.pack('>I', 4 + len(chunks)) + typ + chunks)
+iff_rgb('rgbn_runs.rgbn', b'RGBN', 41, 23, impulse(41, 23,
+    lambda x, y: (smooth(x, y, 0, 15) if x < 20 else 9, smooth(x, y, 1, 15) // 4 * 4, 3 if y > 15 else smooth(x, y, 2, 15), int(x == y)),
+    False, [0, 1, 0, 2]))
+iff_rgb('rgb8_runs.rgb8', b'RGB8', 33, 19, impulse(33, 19,
+    lambda x, y: (smooth(x, y, 0, 255) // 16 * 16, 200 if x < 12 else smooth(x, y, 1, 255), (x // 7) * 30, int(y < 3)),
+    True, [0, 0, 1, 2]))
 
 # MIFF: DirectClass as it is (new header end ':' ^Z), PseudoClass run-length
 # (the old end: form feed, line feed, ':', line feed), 16 bits, RGBA RLE

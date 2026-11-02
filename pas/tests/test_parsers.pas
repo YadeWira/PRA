@@ -567,6 +567,14 @@ begin
   Check((st = psOk) and (L.dataLength = 2 * 13 * 4 * 2), 'acbm_4planes.acbm: ACBM, whole planes');
   dd := Copy(d, 0, Length(d)); dd[12 + 8 + 9] := 1;
   Check(ParseIff(dd, L) = psUnsupported, 'ILBM with a mask plane: unsupported');
+  d := ReadAll(dirC + '/rgbn_runs.rgbn'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.coding = CODING_ILBM) and (L.width = 41) and (L.channels = 4)
+    and (L.dataOffset + L.dataLength = Length(d) - 1), 'rgbn_runs.rgbn: RGBN, Impulse runs across rows, a pad byte after');
+  dd := Copy(d, 0, Length(d) - 40);
+  Check(ParseIff(dd, L) = psTruncated, 'RGBN cut short: truncated');
+  d := ReadAll(dirC + '/rgb8_runs.rgb8'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.width = 33) and (L.channels = 4) and (L.dataOffset + L.dataLength = Length(d)),
+    'rgb8_runs.rgb8: RGB8, counts inline, in a byte, in a word');
   d := ReadAll(dirC + '/miff_direct.miff'); st := ParseAny(d, L);
   Check((st = psOk) and (L.format = rfMIFF) and (L.channels = 3) and (L.dataLength = 29 * 17 * 3),
     'miff_direct.miff: DirectClass, a comment with a colon in it');
@@ -668,5 +676,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 205) then Halt(1);
+  if (failures > 0) or (cells < 208) then Halt(1);
 end.

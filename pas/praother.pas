@@ -77,12 +77,12 @@ function ParseMiff(const d: TBytes; out L: TRasterLayout): TParseStatus;
 
 { ---------- IFF bitplanes ---------- }
 type
-  TIffKind = (ikILBM, ikPBM, ikACBM);
+  TIffKind = (ikILBM, ikPBM, ikACBM, ikRGBN, ikRGB8);
   TIffParams = record
     kind: TIffKind;
     w, h: Int64;
     planes, compression: Integer;
-    rb: Int64;               { bytes a plane's row (ILBM, ACBM) or a row (PBM) }
+    rb: Int64;               { bytes a plane's row (ILBM, ACBM) or a row (PBM, RGBN, RGB8: 4 a pixel) }
   end;
 { what the header (at hdr[first..first+len)) says of the body }
 function IffParams(const hdr: TBytes; first, len: SizeInt; out x: TIffParams): Boolean;
@@ -630,7 +630,8 @@ begin
   typ := '';
   for k := 8 to 11 do typ := typ + Chr(hdr[first + k]);
   if typ = 'ILBM' then x.kind := ikILBM else if typ = 'PBM ' then x.kind := ikPBM
-  else if typ = 'ACBM' then x.kind := ikACBM else Exit;
+  else if typ = 'ACBM' then x.kind := ikACBM else if typ = 'RGBN' then x.kind := ikRGBN
+  else if typ = 'RGB8' then x.kind := ikRGB8 else Exit;
   p := first + 12; e := first + len; haveBmhd := False; mask := 0;
   while p + 8 <= e do begin
     sz := U32BE(hdr, p + 4);
@@ -646,6 +647,12 @@ begin
   { ACBM's planes are never compressed, whatever the BMHD says }
   if x.kind = ikACBM then x.compression := 0;
   { a mask plane (masking 1) is not taken; 2 (a transparent colour) is }
+  if x.kind in [ikRGBN, ikRGB8] then begin
+    { Impulse's run-length (4; 3 is seen too, the same) is all they have }
+    if not (x.compression in [3, 4]) or (x.w > MAX_DIMENSION) then Exit;
+    x.rb := x.w * 4;
+    Exit(True);
+  end;
   if (mask = 1) or not (x.compression in [0, 1]) then Exit;
   case x.kind of
     ikPBM: begin
@@ -665,7 +672,7 @@ end;
 
 function IffDecodedLength(const x: TIffParams): Int64;
 begin
-  if x.kind = ikPBM then Result := x.rb * x.h else Result := x.rb * x.h * x.planes;
+  if x.kind in [ikPBM, ikRGBN, ikRGB8] then Result := x.rb * x.h else Result := x.rb * x.h * x.planes;
 end;
 
 function ParseIff(const d: TBytes; out L: TRasterLayout): TParseStatus;
@@ -689,6 +696,7 @@ begin
   L.width := x.rb * 8; L.height := x.h; L.bigEndian := True;
   case x.kind of
     ikPBM: begin L.width := x.rb; L.channels := 1; L.bits := 8; end;
+    ikRGBN, ikRGB8: begin L.width := x.w; L.channels := 4; L.bits := 8; end;
   else
     { 24, 32 planes: 8 a channel }
     if x.planes > 8 then begin L.channels := x.planes div 8; L.bits := 8; end
@@ -700,7 +708,10 @@ begin
   if Result <> psOk then begin L.format := rfNone; Exit; end;
   need := IffDecodedLength(x);
   if need > MAX_RAW then begin L.format := rfNone; Exit(psUnsupported); end;
-  if x.compression = 1 then begin
+  if x.kind in [ikRGBN, ikRGB8] then begin
+    Result := ImpulseLength(d, L.dataOffset, x.w * x.h, x.kind = ikRGB8, used);
+    if Result <> psOk then begin L.format := rfNone; Exit; end;
+  end else if x.compression = 1 then begin
     Result := PackBitsLength(d, L.dataOffset, need, used);
     if Result <> psOk then begin L.format := rfNone; Exit; end;
   end else begin
@@ -740,6 +751,8 @@ function IffScan(const d: TBytes; first: SizeInt; const x: TIffParams; const L: 
 var dec: TBytes; need: Int64;
 begin
   raw := nil; side := nil; used := 0;
+  if x.kind in [ikRGBN, ikRGB8] then
+    Exit(ImpulseScan(d, first, x.w * x.h, x.kind = ikRGB8, raw, side, used) = psOk);
   need := IffDecodedLength(x);
   if x.compression = 1 then begin
     Result := PackBitsScan(d, first, need, x.rb, dec, side, used) = psOk;
@@ -757,6 +770,8 @@ function IffRebuild(const raw, side: TBytes; const x: TIffParams; usedLimit: Int
 var dec, r: TBytes; need: Int64;
 begin
   coded := nil;
+  if x.kind in [ikRGBN, ikRGB8] then
+    Exit((Length(raw) = x.w * x.h * 4) and ImpulseRebuild(raw, side, x.kind = ikRGB8, usedLimit, coded));
   need := IffDecodedLength(x);
   dec := nil; SetLength(dec, need);
   r := raw;

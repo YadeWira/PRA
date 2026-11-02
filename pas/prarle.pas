@@ -186,6 +186,20 @@ function PictRowsRebuild(const raw, side: TBytes; rows, rowLen: Int64; nunit: In
                          usedLimit: Int64; out coded: TBytes): Boolean;
 function PictRowsFits(rows, rowLen: Int64; nunit: Integer; available: Int64): Boolean;
 
+{ ---------- IFF RGBN and RGB8 (Impulse) ---------- }
+
+{ A pixel and its count, the runs across rows: RGBN, a 16-bit word (4 bits
+  of red, green, blue, a genlock bit, a 3-bit count); RGB8, 4 bytes (red,
+  green, blue, a genlock bit and a 7-bit count). A count of 0: the next
+  byte is the count, or if it is 0 too, the next 16-bit word. npix pixels
+  at d[first..]: the pixels (red, green, blue, genlock: 4 bytes each), the
+  choices coded (side), the coded length. }
+function ImpulseScan(const d: TBytes; first: SizeInt; npix: Int64; rgb8: Boolean;
+                     out raw, side: TBytes; out used: Int64): TParseStatus;
+function ImpulseLength(const d: TBytes; first: SizeInt; npix: Int64; rgb8: Boolean; out used: Int64): TParseStatus;
+function ImpulseRebuild(const raw, side: TBytes; rgb8: Boolean; usedLimit: Int64; out coded: TBytes): Boolean;
+function ImpulseFits(npix: Int64; rgb8: Boolean; available: Int64): Boolean;
+
 implementation
 
 uses Math;
@@ -1711,6 +1725,154 @@ begin
       coded[start] := len;
     end;
     Inc(y);
+  end;
+  Result := o = usedLimit;
+end;
+
+
+{ ---------- IFF RGBN and RGB8 ---------- }
+
+function ImpulseFits(npix: Int64; rgb8: Boolean; available: Int64): Boolean;
+var rs: Int64;
+begin
+  { a record: 2 or 4 bytes and up to 3 more, 1 to 65535 pixels }
+  if rgb8 then rs := 4 else rs := 2;
+  Result := (npix >= 1) and (npix <= MAX_RAW div 4) and (available >= (npix + 65534) div 65535 * rs)
+    and (available <= npix * (rs + 3));
+end;
+
+{ the record at d[p]: its pixel, count, form (0 inline, 1 byte, 2 word), size }
+function ReadImpulse(const d: TBytes; p: SizeInt; rgb8: Boolean; out px: Cardinal; out count, form, size: Integer): Boolean;
+var v, c, rs: Integer;
+begin
+  Result := False; px := 0; count := 0; form := 0; size := 0;
+  if rgb8 then rs := 4 else rs := 2;
+  if p + rs > Length(d) then Exit;
+  if rgb8 then begin
+    px := (Cardinal(d[p]) shl 24) or (Cardinal(d[p + 1]) shl 16) or (Cardinal(d[p + 2]) shl 8) or Cardinal(d[p + 3] shr 7);
+    c := d[p + 3] and 127;
+  end else begin
+    v := (d[p] shl 8) or d[p + 1];
+    px := (Cardinal(v shr 12) shl 24) or (Cardinal((v shr 8) and 15) shl 16) or (Cardinal((v shr 4) and 15) shl 8)
+          or Cardinal((v shr 3) and 1);
+    c := v and 7;
+  end;
+  size := rs;
+  if c = 0 then begin
+    if p + rs + 1 > Length(d) then Exit;
+    c := d[p + rs]; form := 1; size := rs + 1;
+    if c = 0 then begin
+      if p + rs + 3 > Length(d) then Exit;
+      c := (d[p + rs + 1] shl 8) or d[p + rs + 2]; form := 2; size := rs + 3;
+    end;
+  end;
+  count := c;
+  Result := count >= 1;
+end;
+
+function ImpulseLength(const d: TBytes; first: SizeInt; npix: Int64; rgb8: Boolean; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; px: Cardinal; c, f, size: Integer;
+begin
+  used := 0;
+  if npix < 1 then Exit(psMalformed);
+  p := first; n := 0;
+  while n < npix do begin
+    if not ReadImpulse(d, p, rgb8, px, c, f, size) then Exit(psTruncated);
+    if n + c > npix then Exit(psMalformed);
+    Inc(n, c); Inc(p, size);
+  end;
+  used := p - first;
+  Result := psOk;
+end;
+
+function PixelOf(const raw: TBytes; n: Int64): Cardinal; inline;
+begin
+  Result := (Cardinal(raw[4 * n]) shl 24) or (Cardinal(raw[4 * n + 1]) shl 16) or (Cardinal(raw[4 * n + 2]) shl 8) or raw[4 * n + 3];
+end;
+
+{ a record's choices, both ways: its count against the run there is, its
+  form (inline when it fits, a byte, a word) }
+procedure CodeImpulse(var pc: TPacketCoder; const raw: TBytes; n, total: Int64; rgb8: Boolean; var count, form: Integer);
+var er, cmax: Integer;
+begin
+  er := 1;
+  while (er < 65535) and (n + er < total) and (PixelOf(raw, n + er) = PixelOf(raw, n)) do Inc(er);
+  if pc.Bit(BmpBucket(er), Ord(count = er)) <> 0 then count := er
+  else count := pc.Tree(1024, count - 1, 12) + 1 + 4096 * pc.Tree(2048, (count - 1) shr 12, 4);
+  if rgb8 then cmax := 127 else cmax := 7;
+  if count <= cmax then begin
+    if pc.Bit(64, Ord(form = 0)) <> 0 then begin form := 0; Exit; end;
+  end;
+  if count <= 255 then begin
+    if pc.Bit(65 + Ord(count <= cmax), Ord(form = 1)) <> 0 then form := 1 else form := 2;
+  end else form := 2;
+end;
+
+function ImpulseScan(const d: TBytes; first: SizeInt; npix: Int64; rgb8: Boolean;
+                     out raw, side: TBytes; out used: Int64): TParseStatus;
+var p: SizeInt; n: Int64; px: Cardinal; c, f, size, k, c2, f2: Integer; pc: TPacketCoder;
+begin
+  raw := nil; side := nil;
+  Result := ImpulseLength(d, first, npix, rgb8, used);
+  if Result <> psOk then Exit;
+  SetLength(raw, npix * 4);
+  p := first; n := 0;
+  while n < npix do begin
+    ReadImpulse(d, p, rgb8, px, c, f, size);
+    for k := 0 to c - 1 do begin
+      raw[4 * (n + k)] := px shr 24; raw[4 * (n + k) + 1] := (px shr 16) and 255;
+      raw[4 * (n + k) + 2] := (px shr 8) and 255; raw[4 * (n + k) + 3] := px and 255;
+    end;
+    Inc(n, c); Inc(p, size);
+  end;
+  pc.Init(True, nil);
+  p := first; n := 0;
+  while n < npix do begin
+    ReadImpulse(d, p, rgb8, px, c, f, size);
+    c2 := c; f2 := f;
+    CodeImpulse(pc, raw, n, npix, rgb8, c2, f2);
+    Inc(n, c); Inc(p, size);
+  end;
+  side := pc.enc.Finish;
+end;
+
+function ImpulseRebuild(const raw, side: TBytes; rgb8: Boolean; usedLimit: Int64; out coded: TBytes): Boolean;
+var pc: TPacketCoder; n, total: Int64; o: SizeInt; c, f, rs, k, inl: Integer; px: Cardinal;
+begin
+  coded := nil; Result := False;
+  if (Length(raw) mod 4 <> 0) or (usedLimit < 0) then Exit;
+  total := Length(raw) div 4;
+  if rgb8 then rs := 4 else rs := 2;
+  SetLength(coded, usedLimit);
+  pc.Init(False, side);
+  n := 0; o := 0;
+  while n < total do begin
+    c := 1; f := 0;
+    CodeImpulse(pc, raw, n, total, rgb8, c, f);
+    if (c < 1) or (c > 65535) or (n + c > total) then Exit;
+    px := PixelOf(raw, n);
+    for k := 1 to c - 1 do if PixelOf(raw, n + k) <> px then Exit;     { only a damaged side }
+    if f = 0 then inl := c else inl := 0;
+    if o + rs > usedLimit then Exit;
+    if rgb8 then begin
+      if (px and 255) > 1 then Exit;
+      coded[o] := px shr 24; coded[o + 1] := (px shr 16) and 255; coded[o + 2] := (px shr 8) and 255;
+      coded[o + 3] := ((px and 1) shl 7) or inl;
+    end else begin
+      if ((px shr 24) > 15) or (((px shr 16) and 255) > 15) or (((px shr 8) and 255) > 15) or ((px and 255) > 1) then Exit;
+      k := Integer(((px shr 24) shl 12) or (((px shr 16) and 15) shl 8) or (((px shr 8) and 15) shl 4)
+           or ((px and 1) shl 3)) or inl;
+      coded[o] := k shr 8; coded[o + 1] := k and 255;
+    end;
+    Inc(o, rs);
+    if f = 1 then begin
+      if (c > 255) or (o + 1 > usedLimit) then Exit;
+      coded[o] := c; Inc(o);
+    end else if f = 2 then begin
+      if o + 3 > usedLimit then Exit;
+      coded[o] := 0; coded[o + 1] := c shr 8; coded[o + 2] := c and 255; Inc(o, 3);
+    end;
+    Inc(n, c);
   end;
   Result := o = usedLimit;
 end;

@@ -581,6 +581,9 @@ begin
   if pc.useRef then begin
     row0 := Integer(L.dataOffset div L.rowBytes);
     if row0 + L.height > pc.ref^.h then pc.useRef := False;
+    { a channel with no plane goes without; a plane of another size, none }
+    for s := 0 to ns - 1 do
+      if (Length(pc.ref^.v[s]) <> 0) and (Length(pc.ref^.v[s]) <> Int64(w) * pc.ref^.h) then pc.useRef := False;
     SetLength(refRun, ns);
   end;
   for y := 0 to Integer(L.height) - 1 do begin
@@ -692,7 +695,8 @@ begin
         pc.kbits := P.kbits;
         { the reference's sample: a third expectation }
         rv := 65535;
-        if pc.useRef then begin
+        if pc.useRef then pc.mOn[2] := False;
+        if pc.useRef and (Length(pc.ref^.v[s]) > 0) then begin
           rv := pc.ref^.v[s][(row0 + y) * w + x];
           pc.mOn[2] := rv <> 65535;
           if pc.mOn[2] then begin
@@ -1197,11 +1201,13 @@ begin
       Result := IffParams(hdr, hdrFirst, Length(hdr) - hdrFirst, ix) and (L.bits = 8) and (L.height = ix.h)
         and (IffDecodedLength(ix) <= MAX_RAW);
       if Result then
-        if ix.kind = ikPBM then Result := (L.width = ix.rb) and (L.channels = 1)
+        if ix.kind in [ikRGBN, ikRGB8] then Result := (L.width = ix.w) and (L.channels = 4)
+        else if ix.kind = ikPBM then Result := (L.width = ix.rb) and (L.channels = 1)
         else if ix.planes > 8 then Result := (L.width = ix.rb * 8) and (L.channels = ix.planes div 8)
         else Result := (L.width = ix.rb * 8) and (L.channels = 1);
       if Result then
-        if ix.compression = 1 then Result := PackBitsFits(IffDecodedLength(ix), L.dataLength)
+        if ix.kind in [ikRGBN, ikRGB8] then Result := ImpulseFits(ix.w * ix.h, ix.kind = ikRGB8, L.dataLength)
+        else if ix.compression = 1 then Result := PackBitsFits(IffDecodedLength(ix), L.dataLength)
         else Result := L.dataLength = IffDecodedLength(ix);
     end;
     CODING_PCX: begin

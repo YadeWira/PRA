@@ -242,7 +242,9 @@ the model (CODING_PLANES_PACKBITS).
 planes one after another); they become pixels (8-bit indices, or 8 bits a
 channel for 24 and 32 planes) as wide as the rows' padding to 16 bits, so
 the padding's bits come back too. The BMHD in the kept header tells the
-decoder how many planes and whether ByteRun1.
+decoder how many planes and whether ByteRun1. RGBN and RGB8 are pixels and
+counts (Impulse's run-length): 4 channels, red, green, blue and the
+genlock bit, the counts coded against the runs in the pixels.
 
 **TIFF and PSD are parts.** A TIFF's directories point at strips or tiles
 anywhere in the file: `praparts` cuts the file at them, strips that follow
@@ -401,6 +403,16 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: IFF RGBN and RGB8
+
+Impulse's run-length: a pixel and its count, runs across rows (RGBN: 4
+bits a colour in a 16-bit word; RGB8: a byte a colour; a genlock bit in
+both); a count of 0 in the record means a byte follows, and a byte of 0 a
+16-bit word. The pixels go to the model as 4 channels of 8 bits; a run's
+count is coded against the run there is in the pixels, its form (inline,
+a byte, a word) as a choice. The corpus's 14 files, 7.57 MB: **1.73 MB**
+(xz: 2.96 MB); before, PRA did not take them.
 
 ### 01/11/2026: PSD composites against their layers
 
