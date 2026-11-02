@@ -58,6 +58,16 @@ var
 type
   TDecodeStatus = (dsOk, dsEmpty, dsFutureVersion, dsBadStream, dsTooBig);
 
+  { A reference image for the pixels being coded (a PSD's layer for its
+    composite): each channel's samples where the reference has one, 65535
+    where it has none. }
+  TRefPlanes = record
+    w, h: Integer;
+    v: array of array of Word;
+  end;
+  PRefPlanes = ^TRefPlanes;
+
+
 { The stream of d, verified; False if no parser takes d or it did not come
   back (then `why` says why). }
 function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: Integer = 1): Boolean;
@@ -72,11 +82,14 @@ function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function FileFormat(const d: TBytes): TRasterFormat;
 { the stream of one image whose layout is given (a part of a file of
   several: praparts) }
-function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out why: string; threads: Integer = 1): Boolean;
+function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out why: string; threads: Integer = 1;
+                     ref: PRefPlanes = nil): Boolean;
 
 implementation
 
 uses Math, praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain, prasci;
+
+function DecodeImage(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer; ref: PRefPlanes): TDecodeStatus; forward;
 
 { ---------- byte sink and source ---------- }
 
@@ -248,14 +261,17 @@ type
     mDirect: Boolean;             { one bit a pixel: the expectation is the bit (CodeBits) }
     kbits: Integer;
     { two: after the last MATCH_LEN[0] samples, and after the last MATCH_LEN[1] }
-    mOn, mOk: array[0..1] of Boolean;   { an expectation for this sample; its bits still met }
-    mK, mM, mNeg, mLq: array[0..1] of Integer;
-    mc: array[0..1, 0..63] of TCounter;
+    { a third, the reference image's sample (useRef) }
+    useRef: Boolean;
+    ref: PRefPlanes;
+    mOn, mOk: array[0..2] of Boolean;   { an expectation for this sample; its bits still met }
+    mK, mM, mNeg, mLq: array[0..2] of Integer;
+    mc: array[0..2, 0..63] of TCounter;
     function Code(b, node, cls: Integer): Integer;
   end;
 
 function TPixelCoder.Code(b, node, cls: Integer): Integer;
-var i, p, dep, kk, n0, z: Integer; e: array[0..1] of Integer; nh, msk: Cardinal; tc: PCounter;
+var i, p, dep, kk, n0, z, zn: Integer; e: array[0..2] of Integer; nh, msk: Cardinal; tc: PCounter;
   c: array[0..N_MODELS - 1] of PCounter;
 begin
   { the counters straight from the table (the mask keeps them inside), their
@@ -266,9 +282,10 @@ begin
     mx.x[i] := STRETCH_T[c[i]^.p shr 4];
   end;
   n0 := nm;
-  e[0] := -1; e[1] := -1;
+  e[0] := -1; e[1] := -1; e[2] := -1;
+  if useRef then zn := 2 else zn := 1;
   if useMatch then
-    for z := 0 to 1 do begin
+    for z := 0 to zn do begin
       { the bit a match expects at this node: on the length tree's path to
         its length, then its mantissa and its sign while every bit met it }
       if mOn[z] and mDirect then e[z] := mK[z]
@@ -294,7 +311,7 @@ begin
   p := p shl 4;
   if encoding then enc.Encode(b, p) else b := dec.Decode(p);
   for i := 0 to nm - 1 do CounterUpdate(c[i]^, b, COUNTER_LIMIT);
-  for z := 0 to 1 do
+  for z := 0 to 2 do
     if e[z] >= 0 then begin
       CounterUpdate(mc[z, mLq[z] * 2 + e[z]], b, 255);
       if b <> e[z] then mOk[z] := False;
@@ -546,6 +563,7 @@ var
   { the match model: every sample so far, where the last MATCH_MIN were
     last seen, the earlier sample that may come again }
   mt: TMatcher; z: Integer;
+  row0, rv, rm2: Integer; refRun: array of Integer;
 begin
   MakePlan(L, P);
   ns := P.nsub; w := P.cw;
@@ -557,6 +575,14 @@ begin
   half := 1 shl (P.B - 1); full := 1 shl P.B;
   pc.nm := N_MODELS;
   mt.Init(Int64(w) * ns * L.height);
+  { the reference: 8-bit samples a channel each; this band's first row }
+  pc.useRef := (pc.ref <> nil) and (P.B = 8) and (ns = Length(pc.ref^.v)) and (pc.ref^.w = w) and (L.rowBytes > 0);
+  row0 := 0; refRun := nil;
+  if pc.useRef then begin
+    row0 := Integer(L.dataOffset div L.rowBytes);
+    if row0 + L.height > pc.ref^.h then pc.useRef := False;
+    SetLength(refRun, ns);
+  end;
   for y := 0 to Integer(L.height) - 1 do begin
     cur := y mod 3; up := (y + 2) mod 3; up2 := (y + 1) mod 3;
     ecur := y mod 2; eup := (y + 1) mod 2;
@@ -664,6 +690,20 @@ begin
         { the match's expectation: its sample's residual }
         mt.Expect(pc, pred, half, full, P.B, False);
         pc.kbits := P.kbits;
+        { the reference's sample: a third expectation }
+        rv := 65535;
+        if pc.useRef then begin
+          rv := pc.ref^.v[s][(row0 + y) * w + x];
+          pc.mOn[2] := rv <> 65535;
+          if pc.mOn[2] then begin
+            rm2 := rv - pred;
+            if rm2 >= half then rm2 := rm2 - full else if rm2 < -half then rm2 := rm2 + full;
+            pc.mM[2] := Abs(rm2); pc.mK[2] := BitLen(pc.mM[2]); pc.mNeg[2] := Ord(rm2 < 0);
+            if pc.mK[2] >= P.B then pc.mOn[2] := False;
+            pc.mLq[2] := Cap(refRun[s], 31);
+            pc.mOk[2] := True;
+          end;
+        end;
         { the residual, modulo 2^B, in [-half, half) }
         if pc.encoding then begin
           r := rows[cur][idx] - pred;
@@ -696,6 +736,8 @@ begin
         errs[ecur][idx] := r;
         { the match: kept up, or found again from the last MATCH_MIN samples }
         mt.Update(v);
+        if pc.useRef then
+          if rv = v then Inc(refRun[s]) else refRun[s] := 0;
         if (blend <> 0) and (P.predRef[s] < 0) then
           for i2 := 0 to N_PRED - 1 do eP[ecur][idx * N_PRED + i2] := Abs(v - pr[i2]);
       end;
@@ -869,13 +911,13 @@ begin
   if bits < TABLE_BITS_MIN then bits := TABLE_BITS_MIN;
   pc.t.Init(bits);
   pc.sel := 0; pc.sel2 := -1; pc.apmCtx := 0;
-  pc.useMatch := False; pc.mTree := False; pc.mDirect := False;
-  for i := 0 to 1 do begin pc.mOn[i] := False; pc.mOk[i] := False; end;
-  for i := 0 to 63 do begin CounterInit(pc.mc[0, i]); CounterInit(pc.mc[1, i]); end;
+  pc.useMatch := False; pc.mTree := False; pc.mDirect := False; pc.useRef := False; pc.ref := nil;
+  for i := 0 to 2 do begin pc.mOn[i] := False; pc.mOk[i] := False; end;
+  for i := 0 to 63 do begin CounterInit(pc.mc[0, i]); CounterInit(pc.mc[1, i]); CounterInit(pc.mc[2, i]); end;
   if L.bits = 1 then pc.mx.Init(7, 32, MIXER_RATE)
   else begin
-    pc.mx.Init(N_MODELS + 3, N_CLASSES * MAX_SUB_SEL * 4, MIXER_RATE);
-    pc.mx2.Init(N_MODELS + 3, N_CLASSES * N_SEL2, MIXER_RATE);
+    pc.mx.Init(N_MODELS + 4, N_CLASSES * MAX_SUB_SEL * 4, MIXER_RATE);
+    pc.mx2.Init(N_MODELS + 4, N_CLASSES * N_SEL2, MIXER_RATE);
     pc.apm.Init(N_CLASSES * 16, 6);
   end;
 end;
@@ -893,11 +935,12 @@ begin
   Result := (L.channels = 1) and (L.bits >= 2) and (L.bits <= 8);
 end;
 
-function EncodePixels(const d: TBytes; const L: TRasterLayout; mode: Integer = MODE_SAMPLES): TBytes;
+function EncodePixels(const d: TBytes; const L: TRasterLayout; mode: Integer = MODE_SAMPLES; ref: PRefPlanes = nil): TBytes;
 var pc: TPixelCoder; dd: TBytes;
 begin
   pc.encoding := True;
   InitCoder(pc, L);
+  pc.ref := ref;
   pc.enc.Init;
   dd := d;
   if L.bits = 1 then CodeBits(pc, dd, L)
@@ -906,11 +949,13 @@ begin
   Result := pc.enc.Finish;
 end;
 
-procedure DecodePixels(const s: TBytes; first: SizeInt; var d: TBytes; const L: TRasterLayout; mode: Integer = MODE_SAMPLES);
+procedure DecodePixels(const s: TBytes; first: SizeInt; var d: TBytes; const L: TRasterLayout; mode: Integer = MODE_SAMPLES;
+                       ref: PRefPlanes = nil);
 var pc: TPixelCoder;
 begin
   pc.encoding := False;
   InitCoder(pc, L);
+  pc.ref := ref;
   pc.dec.Init(s, first);
   if L.bits = 1 then CodeBits(pc, d, L)
   else if mode = MODE_INDICES then CodeIndices(pc, d, L)
@@ -1347,6 +1392,7 @@ type
     mode: Integer;
     back: TBytes;
     failed: Boolean;
+    ref: PRefPlanes;
   end;
   PVerifier = ^TVerifier;
 
@@ -1358,6 +1404,7 @@ begin
   try
     pc.encoding := False;
     InitCoder(pc, v^.L);
+    pc.ref := v^.ref;
     pc.dec.InitLive(v^.live);
     if v^.L.bits = 1 then CodeBits(pc, v^.back, v^.L)
     else if v^.mode = MODE_INDICES then CodeIndices(pc, v^.back, v^.L)
@@ -1368,11 +1415,13 @@ begin
   Result := 0;
 end;
 
-function EncodePixelsLive(const d: TBytes; const L: TRasterLayout; mode: Integer; live: TLiveStream): TBytes;
+function EncodePixelsLive(const d: TBytes; const L: TRasterLayout; mode: Integer; live: TLiveStream;
+                          ref: PRefPlanes = nil): TBytes;
 var pc: TPixelCoder; dd: TBytes;
 begin
   pc.encoding := True;
   InitCoder(pc, L);
+  pc.ref := ref;
   pc.enc.InitLive(live);
   dd := d;
   try
@@ -1463,6 +1512,7 @@ type
     px, back: TBytes;
     Lp: TRasterLayout;
     mode, n: Integer;
+    ref: PRefPlanes;
     outs: array of TBytes;
     failed: array of Boolean;
   end;
@@ -1475,12 +1525,12 @@ begin
   e^.failed[k] := True;
   Lb := BandLayout(e^.Lp, e^.n, k);
   live := TLiveStream.Create;
-  v.live := live; v.L := Lb; v.mode := e^.mode; v.back := e^.back; v.failed := True;
+  v.live := live; v.L := Lb; v.mode := e^.mode; v.back := e^.back; v.failed := True; v.ref := e^.ref;
   tid := BeginThread(@VerifierRun, @v);
   ok := True;
   try
     { on an exception EncodePixelsLive finishes the stream: the verifier ends }
-    e^.outs[k] := EncodePixelsLive(e^.px, Lb, e^.mode, live);
+    e^.outs[k] := EncodePixelsLive(e^.px, Lb, e^.mode, live, e^.ref);
   except
     ok := False;
   end;
@@ -1499,6 +1549,7 @@ type
     out_: TBytes;
     Lp: TRasterLayout;
     mode, n: Integer;
+    ref: PRefPlanes;
     failed: array of Boolean;
   end;
   PDecodeBands = ^TDecodeBands;
@@ -1509,7 +1560,7 @@ begin
   e := ctx;
   e^.failed[k] := True;
   try
-    DecodePixels(e^.bytes[k], 0, e^.out_, BandLayout(e^.Lp, e^.n, k), e^.mode);
+    DecodePixels(e^.bytes[k], 0, e^.out_, BandLayout(e^.Lp, e^.n, k), e^.mode, e^.ref);
     e^.failed[k] := False;
   except
   end;
@@ -1523,7 +1574,8 @@ begin
   Result := (len = 0) or CompareMem(@a[aFirst], @b[bFirst], len);
 end;
 
-function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out why: string; threads: Integer): Boolean;
+function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out why: string; threads: Integer;
+                     ref: PRefPlanes): Boolean;
 var
   Lp, Lt: TRasterLayout; o: TSink; tailFirst, used, trialRows: Int64; flags: Byte;
   px, rgbe, modes, side, prefix, lines, back: TBytes; y, run, m, k: Integer; at: SizeInt;
@@ -1585,7 +1637,9 @@ begin
     o.Put(m);
   end;
   { the bands }
-  eb.px := px; eb.Lp := Lp; eb.mode := m;
+  eb.px := px; eb.Lp := Lp; eb.mode := m; eb.ref := ref;
+  { a reference is for pixels from the start of the buffer (a part's) }
+  if Lp.dataOffset <> 0 then eb.ref := nil;
   eb.n := BandCount(Lp);
   o.PutVarint(eb.n);
   { the pixels, and their check beside them: each band decoded by a second
@@ -1648,16 +1702,106 @@ const
   PART_BYTES = 0;
   PART_IMAGE = 1;
   PART_COPY = 2;        { its length, then where the same bytes are, earlier }
+  PART_REF = 3;         { an image coded against references elsewhere in the file }
   MIN_COPY = 64;
 
 type
   PTBytes = ^TBytes;
 
+{ ---------- references between parts ---------- }
+
+procedure PutSVarint(var o: TSink; v: Int64);
+begin
+  if v < 0 then o.PutVarint(((-v) shl 1) - 1) else o.PutVarint(v shl 1);
+end;
+
+function GetSVarint(var src: TSource; maxAbs: Int64): Int64;
+var u: Int64;
+begin
+  u := src.GetVarint(2 * maxAbs + 1);
+  if Odd(u) then Result := -((u + 1) shr 1) else Result := u shr 1;
+end;
+
+{ a w x h image's reference planes from the parts' references, read from
+  the file's bytes (d, the first `avail` of them): each channel's
+  reference decoded (as it is, or PackBits) and placed where it lies }
+function BuildRef(const d: TBytes; avail: Int64; const refs: array of TPartRef; w, h: Int64; out R: TRefPlanes): Boolean;
+var c: Integer; raw, side: TBytes; used, x, y, lx, ly: Int64;
+begin
+  Result := False;
+  R.w := w; R.h := h; R.v := nil; SetLength(R.v, Length(refs));
+  if (w < 1) or (h < 1) or (w > MAX_DIMENSION) or (h > MAX_DIMENSION) then Exit;
+  for c := 0 to High(refs) do begin
+    if refs[c].len = 0 then Continue;
+    with refs[c] do begin
+      if (w < 1) or (h < 1) or (w > MAX_DIMENSION) or (h > MAX_DIMENSION) or (first < 0) or (len < 1)
+         or (first > avail - len) then Exit;
+      if packed_ then begin
+        if not PackBitsFits(w * h, len) then Exit;
+        if (PackBitsScan(d, first, w * h, w, raw, side, used) <> psOk) or (used <> len) then Exit;
+      end else begin
+        if len <> w * h then Exit;
+        raw := Copy(d, first, len);
+      end;
+    end;
+    SetLength(R.v[c], R.w * R.h);
+    y := 0;
+    while y < R.h do begin
+      x := 0;
+      while x < R.w do begin
+        lx := x - refs[c].left; ly := y - refs[c].top;
+        if (lx >= 0) and (ly >= 0) and (lx < refs[c].w) and (ly < refs[c].h) then R.v[c][y * R.w + x] := raw[ly * refs[c].w + lx]
+        else R.v[c][y * R.w + x] := 65535;
+        Inc(x);
+      end;
+      Inc(y);
+    end;
+  end;
+  Result := True;
+end;
+
+procedure PutRefs(var o: TSink; const refs: array of TPartRef);
+var c: Integer;
+begin
+  o.PutVarint(Length(refs));
+  for c := 0 to High(refs) do
+    if refs[c].len = 0 then o.Put(0)
+    else begin
+      o.Put(1 + Ord(refs[c].packed_));
+      o.PutVarint(refs[c].first); o.PutVarint(refs[c].len);
+      o.PutVarint(refs[c].w); o.PutVarint(refs[c].h);
+      PutSVarint(o, refs[c].left); PutSVarint(o, refs[c].top);
+    end;
+end;
+
+function GetRefs(var src: TSource; total: Int64; out refs: TPartRefs): Boolean;
+var n, c, f: Integer;
+begin
+  Result := False; refs := nil;
+  n := Integer(src.GetVarint(MAX_CHANNELS));
+  if not src.ok then Exit;
+  SetLength(refs, n);
+  for c := 0 to n - 1 do begin
+    f := src.Get;
+    refs[c].len := 0;
+    if f = 0 then Continue;
+    if f > 2 then Exit;
+    refs[c].packed_ := f = 2;
+    refs[c].first := src.GetVarint(total); refs[c].len := src.GetVarint(total);
+    refs[c].w := src.GetVarint(MAX_DIMENSION); refs[c].h := src.GetVarint(MAX_DIMENSION);
+    refs[c].left := GetSVarint(src, MAX_DIMENSION); refs[c].top := GetSVarint(src, MAX_DIMENSION);
+    if refs[c].len < 1 then Exit;
+  end;
+  Result := src.ok;
+end;
+
 { orig: the encoder's check of the frame, the images (each verified when
-  it was coded) taken from the original instead of decoded again }
+  it was coded) taken from the original instead of decoded again; but an
+  image with references is decoded, as the decoder will }
 function DecodeParts(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer;
                      orig: PTBytes = nil): TDecodeStatus;
 var src: TSource; n, k: SizeInt; len, slen, total, from: Int64; kind: Integer; part: TBytes; st: TDecodeStatus;
+  refs: TPartRefs; hd: TStreamHead; Rp: TRefPlanes; hasRef: Boolean; sub: TBytes;
 begin
   d := nil;
   src.b := s; src.p := 1; src.ok := True;
@@ -1668,7 +1812,7 @@ begin
   for k := 1 to n do begin
     kind := src.Get;
     len := src.GetVarint(High(Int64) shr 1);
-    if not src.ok or (kind > PART_COPY) then Exit(dsBadStream);
+    if not src.ok or (kind > PART_REF) then Exit(dsBadStream);
     if len > maxOut - total then Exit(dsTooBig);
     if kind = PART_COPY then begin
       from := src.GetVarint(total);
@@ -1677,13 +1821,25 @@ begin
     end else if kind = PART_BYTES then begin
       if not GetSection(src, IMAGE_STREAM, len, part) then Exit(dsBadStream);
     end else begin
+      { an image; with references (PART_REF), they come first }
+      hasRef := kind = PART_REF;
+      if hasRef and not GetRefs(src, total, refs) then begin d := nil; Exit(dsBadStream); end;
       slen := src.GetVarint(Length(s) - src.p);
       if not src.ok or (slen < 1) or (s[src.p] = PARTS_STREAM) then Exit(dsBadStream);
-      if orig <> nil then begin
+      if (orig <> nil) and not hasRef then begin
         if total + len > Length(orig^) then Exit(dsBadStream);
         part := Copy(orig^, total, len);
+      end else if hasRef then begin
+        { decoded for real even in the encoder's check: its references are
+          read from what the parts before rebuilt }
+        { the planes, as big as the image the stream says }
+        sub := Copy(s, src.p, slen);
+        if ReadStream(sub, len, hd) <> dsOk then begin d := nil; Exit(dsBadStream); end;
+        if not BuildRef(d, total, refs, hd.L.width, hd.L.height, Rp) then begin d := nil; Exit(dsBadStream); end;
+        st := DecodeImage(sub, len, part, threads, @Rp);
+        if st <> dsOk then begin d := nil; Exit(st); end;
       end else begin
-        st := DecodeFile(Copy(s, src.p, slen), len, part, threads);
+        st := DecodeImage(Copy(s, src.p, slen), len, part, threads, nil);
         if st <> dsOk then begin d := nil; Exit(st); end;
       end;
       if Length(part) <> len then begin d := nil; Exit(dsBadStream); end;
@@ -1703,7 +1859,7 @@ function EncodeParts(const d: TBytes; const parts: TParts; out s: TBytes; out wh
 var
   o: TSink; k, j, n, images, m: Integer; img, back: TBytes; w: string;
   subs: array of TBytes; first, len, copyFrom: array of Int64;
-  hashes: array of QWord; h: QWord; q: Int64;
+  hashes: array of QWord; h: QWord; q: Int64; refOf: array of Integer; Rp: TRefPlanes;
 begin
   { the same bytes as an earlier part (a hash of each, then the bytes
     compared): a copy }
@@ -1721,8 +1877,9 @@ begin
   subs := nil; first := nil; len := nil; copyFrom := nil; n := 0;
   SetLength(subs, Length(parts)); SetLength(first, Length(parts)); SetLength(len, Length(parts));
   SetLength(copyFrom, Length(parts));
+  refOf := nil; SetLength(refOf, Length(parts));
   for k := 0 to High(parts) do begin
-    subs[n] := nil; copyFrom[n] := -1;
+    subs[n] := nil; copyFrom[n] := -1; refOf[n] := -1;
     if parts[k].len >= MIN_COPY then
       for m := 0 to k - 1 do
         if (hashes[m] = hashes[k]) and (parts[m].len = parts[k].len)
@@ -1734,7 +1891,11 @@ begin
     end;
     if parts[k].kind = pkImage then begin
       img := Copy(d, parts[k].first, parts[k].len);
-      if not EncodeImage(img, parts[k].L, subs[n], w, threads) or (Length(subs[n]) >= parts[k].len) then
+      { against its references (they lie before it), or on its own }
+      if (Length(parts[k].refs) > 0) and BuildRef(d, parts[k].first, parts[k].refs, parts[k].L.width, parts[k].L.height, Rp)
+         and EncodeImage(img, parts[k].L, subs[n], w, threads, @Rp) and (Length(subs[n]) < parts[k].len) then
+        refOf[n] := k
+      else if not EncodeImage(img, parts[k].L, subs[n], w, threads) or (Length(subs[n]) >= parts[k].len) then
         subs[n] := nil;
     end;
     if (subs[n] = nil) and (n > 0) and (subs[n - 1] = nil) and (copyFrom[n - 1] < 0) then Inc(len[n - 1], parts[k].len)
@@ -1751,8 +1912,14 @@ begin
       o.PutVarint(copyFrom[j]);
       Inc(images);
     end else if subs[j] <> nil then begin
-      o.Put(PART_IMAGE);
-      o.PutVarint(len[j]);
+      if refOf[j] >= 0 then begin
+        o.Put(PART_REF);
+        o.PutVarint(len[j]);
+        PutRefs(o, parts[refOf[j]].refs);
+      end else begin
+        o.Put(PART_IMAGE);
+        o.PutVarint(len[j]);
+      end;
       o.PutVarint(Length(subs[j]));
       o.PutBytes(subs[j], 0, Length(subs[j]));
       Inc(images);
@@ -1793,10 +1960,16 @@ begin
 end;
 
 function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer): TDecodeStatus;
+begin
+  if (Length(s) > 0) and (s[0] = PARTS_STREAM) then Exit(DecodeParts(s, maxOut, d, threads));
+  Result := DecodeImage(s, maxOut, d, threads, nil);
+end;
+
+{ an image's stream, with the reference its part has, if any }
+function DecodeImage(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer; ref: PRefPlanes): TDecodeStatus;
 var h: TStreamHead; rgbe, lines: TBytes; tailFirst: Int64; db: TDecodeBands; k: Integer;
 begin
   d := nil;
-  if (Length(s) > 0) and (s[0] = PARTS_STREAM) then Exit(DecodeParts(s, maxOut, d, threads));
   Result := ReadStream(s, maxOut, h);
   if Result <> dsOk then Exit;
   SetLength(d, h.L.dataOffset + h.L.dataLength + h.tailLen);
@@ -1804,7 +1977,7 @@ begin
   tailFirst := h.L.dataOffset + h.L.dataLength;
   if h.tailLen > 0 then Move(h.tail[0], d[tailFirst], h.tailLen);
   { the bands, each from its own bytes, into the pixels (or an HDR file's RGBE) }
-  db.n := h.bands; db.mode := h.mode;
+  db.n := h.bands; db.mode := h.mode; db.ref := ref;
   if h.L.coding <> CODING_RAW then begin
     db.Lp := RawLayout(h.L);
     rgbe := nil; SetLength(rgbe, db.Lp.dataLength);
@@ -1813,6 +1986,8 @@ begin
     db.Lp := h.L;
     db.out_ := d;
   end;
+  { as the encoder: a reference is for pixels from the start of the buffer }
+  if db.Lp.dataOffset <> 0 then db.ref := nil;
   db.bytes := nil; SetLength(db.bytes, db.n);
   for k := 0 to db.n - 1 do db.bytes[k] := Copy(s, h.bandFirst[k], h.bandLen[k]);
   db.failed := nil; SetLength(db.failed, db.n);

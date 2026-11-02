@@ -548,6 +548,10 @@ begin
     'psd_raw.psd: a raw composite, its planes interleaved');
   dd := Copy(d, 0, Length(d)); dd[4] := 0; dd[5] := 3;
   Check(not Split(dd, parts, fmt), 'PSD of version 3: not split');
+  d := ReadAll(dirC + '/psd_nearcopy.psd');
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (Length(parts[High(parts)].refs) = 3)
+    and (parts[High(parts)].refs[0].len > 0) and parts[High(parts)].refs[0].packed_,
+    'psd_nearcopy.psd: the composite''s channels with the layer''s as references');
   d := ReadAll(dirC + '/psd_dup.psd');
   Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[High(parts)].L.channels = 1)
     and (parts[High(parts)].len = parts[High(parts) - 2].len),
@@ -664,5 +668,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 204) then Halt(1);
+  if (failures > 0) or (cells < 205) then Halt(1);
 end.

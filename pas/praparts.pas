@@ -46,12 +46,22 @@ uses SysUtils, praraster;
 type
   TPartKind = (pkBytes, pkImage);
 
+  { An image part's reference for one of its channels: a one-channel 8-bit
+    image elsewhere in the file (a PSD layer's channel), as it is or
+    PackBits, w x h, its top left at (left, top) of this image. }
+  TPartRef = record
+    first, len, w, h, left, top: Int64;
+    packed_: Boolean;
+  end;
+
   TPart = record
     kind: TPartKind;
     first, len: Int64;             { where it is in the file }
     L: TRasterLayout;              { pkImage: its layout, offsets from first }
+    refs: array of TPartRef;       { a channel's reference (len 0: none) }
   end;
   TParts = array of TPart;
+  TPartRefs = array of TPartRef;
 
 { The parts of a file of several images, and the file's format (rfICO,
   rfCUR, rfDCX, or its images' own). False when it is not one: then
@@ -89,7 +99,7 @@ begin
   end;
   SetLength(parts, n + 1);
   parts[n].kind := pkBytes; parts[n].first := first; parts[n].len := len;
-  parts[n].L.Clear;
+  parts[n].L.Clear; parts[n].refs := nil;
 end;
 
 procedure AddImage(var parts: TParts; first, len: Int64; const L: TRasterLayout);
@@ -98,7 +108,7 @@ begin
   n := Length(parts);
   SetLength(parts, n + 1);
   parts[n].kind := pkImage; parts[n].first := first; parts[n].len := len;
-  parts[n].L := L;
+  parts[n].L := L; parts[n].refs := nil;
 end;
 
 { ---------- Netpbm: one image after another ---------- }
@@ -605,7 +615,8 @@ end;
   which the encoder codes as a copy, the planes between them one image,
   interleaved. False when none is (the composite is then one image). }
 function PsdPlanesApart(const d: TBytes; const x: TPsd; q, len, w, h: Int64; ch: Integer;
-                        const layers: TInt64Array; var parts: TParts): Boolean;
+                        const layers: TInt64Array; const cand: array of TPartRef; useRefs: Boolean;
+                        var parts: TParts): Boolean;
 var
   comp, tbl, pl, used, tot: Int64; c, k, y, g: Integer; L, G1: TRasterLayout; at, size: array of Int64;
   dup: Boolean; isDup: array of Boolean;
@@ -662,6 +673,12 @@ begin
     end else if comp = 1 then G1.coding := CODING_PACKBITS;
     if comp = 1 then G1.dataLength := tot;
     AddImage(parts, at[c], tot, G1);
+    { the planes between the copies: against the layer too }
+    if useRefs and (g > 1) then begin
+      SetLength(parts[High(parts)].refs, g);
+      for k := 0 to g - 1 do
+        if c + k <= 2 then parts[High(parts)].refs[k] := cand[c + k] else parts[High(parts)].refs[k].len := 0;
+    end;
     Inc(c, g);
   end;
   Result := True;
@@ -671,7 +688,8 @@ function SplitPsd(const d: TBytes; var parts: TParts): Boolean;
 var
   x: TPsd; ver, channels, h, w, depth, p, n, lmEnd, liLen, liEnd, count, q: Int64;
   lsz, k, c: Integer; top, left, bottom, right, nch, ln, extra, id, mt, ml, mb, mr: Int64; first: Integer;
-  chans: array of record id, len, w, h: Int64; end;
+  chans: array of record id, len, w, h, top, left: Int64; end;
+  cand: array[0..2] of TPartRef; area: array[0..2] of Int64; ov: Int64;
   start: Int64; layers: TInt64Array;
 begin
   Result := False;
@@ -690,6 +708,7 @@ begin
   if (n < 0) or (n > Length(d) - p - lsz) then Exit;
   lmEnd := p + lsz + n;
   chans := nil; layers := nil;
+  for c := 0 to 2 do begin cand[c].len := 0; area[c] := 0; end;
   start := 0;
   { the layers: their records, then each one's channels, in order }
   if n > 0 then begin
@@ -717,6 +736,7 @@ begin
           SetLength(chans, Length(chans) + 1);
           chans[High(chans)].id := id; chans[High(chans)].len := ln;
           chans[High(chans)].w := right - left; chans[High(chans)].h := bottom - top;
+          chans[High(chans)].top := top; chans[High(chans)].left := left;
         end;
         { blend mode, opacity, flags, then the extra data: first the layer
           mask's, whose rectangle the mask channel (-2) has }
@@ -742,6 +762,20 @@ begin
           { where this channel's pixels are, for the composite to compare }
           SetLength(layers, Length(layers) + 2);
           layers[High(layers) - 1] := parts[High(parts)].first; layers[High(layers)] := parts[High(parts)].len;
+          { the colour channels (0, 1, 2) of the layer that covers most of
+            the canvas: the composite's references }
+          if (chans[k].id >= 0) and (chans[k].id <= 2) then begin
+            ov := Max(0, Min(h, chans[k].top + chans[k].h) - Max(0, chans[k].top))
+                * Max(0, Min(w, chans[k].left + chans[k].w) - Max(0, chans[k].left));
+            if ov > area[chans[k].id] then begin
+              area[chans[k].id] := ov;
+              with cand[chans[k].id] do begin
+                first := parts[High(parts)].first; len := parts[High(parts)].len;
+                w := chans[k].w; h := chans[k].h; left := chans[k].left; top := chans[k].top;
+                packed_ := parts[High(parts)].L.coding = CODING_PACKBITS;
+              end;
+            end;
+          end;
         end;
         Inc(q, chans[k].len);
         start := q;
@@ -751,8 +785,18 @@ begin
   AddBytes(parts, start, lmEnd - start);
   { the composite: every channel's plane, one after the other }
   if (h >= 1) and (w >= 1) and (channels * h <= MAX_DIMENSION) then begin
-    if not PsdPlanesApart(d, x, lmEnd, Length(d) - lmEnd, w, h, channels, layers, parts)
-       and not PsdPlanes(d, x, lmEnd, Length(d) - lmEnd, w, h, channels, parts) then
+    if PsdPlanesApart(d, x, lmEnd, Length(d) - lmEnd, w, h, channels, layers, cand,
+                      (x.bits = 8) and (area[0] * 4 >= w * h), parts) then
+    else if PsdPlanes(d, x, lmEnd, Length(d) - lmEnd, w, h, channels, parts) then begin
+      { a layer over a quarter of the canvas or more: the composite's
+        channels are coded against its, where it has them }
+      if (x.bits = 8) and (channels > 1) and (parts[High(parts)].kind = pkImage)
+         and (parts[High(parts)].L.channels = channels) and (area[0] * 4 >= w * h) then begin
+        SetLength(parts[High(parts)].refs, channels);
+        for c := 0 to channels - 1 do
+          if c <= 2 then parts[High(parts)].refs[c] := cand[c] else parts[High(parts)].refs[c].len := 0;
+      end;
+    end else
       AddBytes(parts, lmEnd, Length(d) - lmEnd);
   end else AddBytes(parts, lmEnd, Length(d) - lmEnd);
   Result := True;

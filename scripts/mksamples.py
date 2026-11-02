@@ -936,3 +936,27 @@ rows = [pack1([1 if (x * 3 + y * 5) % 11 < 4 else 0 for x in range(w)]).ljust(rb
 v1 = struct.pack('>H', 0) + struct.pack('>4h', 0, 0, h, w) + b'\x11\x01' + b'\x98' + struct.pack('>H4h', rb, 0, 0, h, w) \
      + struct.pack('>4h', 0, 0, h, w) * 2 + struct.pack('>H', 0) + pict_rows(rows, rb) + b'\xff'
 write('pict_v1_bitmap.pict', bytes(512) + v1)
+
+# PSD: a layer that nearly is the composite (a few pixels differ, so no
+# plane is a copy): the composite coded against it
+def psd_near(name, w, h):
+    layer = [bytes(smooth(x, y, c, 255) for y in range(h) for x in range(w)) for c in range(3)]
+    comp = [bytearray(p) for p in layer]
+    for c in range(3):
+        for k in range(0, w * h, 37): comp[c][k] = (comp[c][k] + 50) % 256
+    def rle_plane(pl):
+        rows = [packbits(pl[y * w:(y + 1) * w], w) for y in range(h)]
+        return b''.join(struct.pack('>H', len(r)) for r in rows) + b''.join(rows)
+    recs = struct.pack('>iiiiH', 0, 0, h, w, 3)
+    datas = [struct.pack('>H', 1) + rle_plane(layer[c]) for c in range(3)]
+    for c in range(3): recs += struct.pack('>hI', c, len(datas[c]))
+    extra = struct.pack('>I', 0) + struct.pack('>I', 0) + b'\x03abc'
+    recs += b'8BIMnorm' + bytes([255, 0, 0, 0]) + struct.pack('>I', len(extra)) + extra
+    li = struct.pack('>h', 1) + recs + b''.join(datas)
+    if len(li) & 1: li += b'\0'
+    lm = struct.pack('>I', len(li)) + li + struct.pack('>I', 0)
+    head = b'8BPS' + struct.pack('>H', 1) + bytes(6) + struct.pack('>HIIHH', 3, h, w, 8, 3) + struct.pack('>I', 0) + struct.pack('>I', 0)
+    rows = [packbits(bytes(comp[c][y * w:(y + 1) * w]), w) for c in range(3) for y in range(h)]
+    write(name, head + struct.pack('>I', len(lm)) + lm + struct.pack('>H', 1)
+          + b''.join(struct.pack('>H', len(r)) for r in rows) + b''.join(rows))
+psd_near('psd_nearcopy.psd', 40, 26)

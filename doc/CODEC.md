@@ -70,7 +70,20 @@ parts       how many (varint), then each:
             then its stream: version 4, as if the image were a file
   copy:     its length (varint), and where the same bytes are earlier in
             the file (varint)
+  image against references (kind 3): its length (varint), then each
+            channel's reference: 0 none, 1 an image as it is, 2 PackBits;
+            where it is in the file, its length, width and height
+            (varints), its top left in this image (signed varints); then
+            its stream as an image's
 ```
+
+**References.** A PSD layer that covers a quarter of the canvas or more
+gives the composite, channel by channel, a reference: its sample at the
+same place is a third expectation in the pixel model (as a match's, with a
+counter for how long the reference has been right). The decoder reads the
+references from the file it has rebuilt so far, as the encoder did; the
+encoder's check decodes such a part for real. A 0.1.0 decoder refuses a
+stream with this kind of part; 0.1.0's streams are read as they were.
 
 A part that is byte for byte an earlier one (64 bytes and more) is a copy:
 a PSD whose layer is its composite, an icon's masks alike. A PSD's
@@ -388,6 +401,16 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 01/11/2026: PSD composites against their layers
+
+The 14 PSD files of the corpus, 82.0 MB: 24.4 MB before, **19.5 MB** with
+the references (xz: 23.7 MB). example.psd 10.8 MB -> 6.31 (xz 8.65),
+main1 990 KB -> 680 (xz 783), example_small 571 -> 333 (xz 406). A first
+version decoded such parts with its stream and its output in one variable
+and came out wrong: the encoder's check took the images from the original
+and did not see it, so a part against references is now decoded for real
+in that check.
 
 ### 01/11/2026: against packPNM 1.6d again, before the first release
 

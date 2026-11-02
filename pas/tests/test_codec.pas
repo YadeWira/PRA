@@ -251,6 +251,12 @@ begin
         if names[k2] = 'psd_raw.psd' then Check(Length(s) < Length(samples[k2]) div 2 + 200,
           'psd_dup.psd: the copies cost almost nothing');
     end;
+  { a PSD whose layer nearly is its composite: the composite against it }
+  for k := 0 to High(samples) do
+    if names[k] = 'psd_nearcopy.psd' then begin
+      Check(EncodeFile(samples[k], s, why) and (DecodeFile(s, Length(samples[k]), back) = dsOk) and Same(back, samples[k]),
+        Format('psd_nearcopy.psd, against its layer: back; %d -> %d', [Length(samples[k]), Length(s)]));
+    end;
   { version 1 (made by the code of f75c10f from tests/other/tga_rgb24.tga)
     is of the model before the match models: refused, not misread }
   s2 := ReadAll('pas/tests/stream_v1_tga.bin');
@@ -300,5 +306,5 @@ begin
 
   Writeln('streams ', Hex(all.Final));
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 40) then Halt(1);
+  if (failures > 0) or (cells < 41) then Halt(1);
 end.
