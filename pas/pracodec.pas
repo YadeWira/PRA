@@ -1552,7 +1552,7 @@ type
   PEncodeBands = ^TEncodeBands;
 
 procedure EncodeBandJob(ctx: Pointer; k: Integer);
-var e: PEncodeBands; Lb: TRasterLayout; live: TLiveStream; v: TVerifier; tid: TThreadID = 0; ok: Boolean;
+var e: PEncodeBands; Lb: TRasterLayout; live: TLiveStream; v: TVerifier; tid: TThreadID; ok: Boolean;
 begin
   e := ctx;
   e^.failed[k] := True;
