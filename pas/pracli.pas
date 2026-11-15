@@ -4,6 +4,12 @@
     pra a [options] FILE...     compress: image.ppm -> image.pra
     pra x [options] FILE...     extract:  image.pra -> image.ppm
     pra list FILE...            what each .pra holds
+    pra t FILE...               test: extract and verify, write nothing
+    pra info FILE...            the structure of each file, and what PRA does with it
+    pra report [FILE]           a bug report, and a link to open an issue with it
+    pra bench FILE...           how fast this machine compresses and extracts them
+    pra selftest                the samples inside the binary, on every SIMD path
+    pra --version               the build, the system and the SIMD path
 
   Nothing is written under an output's name unless it verified: `a` checks
   that its stream decompresses to the input, `x` that the size and the hash
@@ -15,9 +21,13 @@ program pracli;
 {$ifopt Q-}{$fatal pracli: overflow checks ($Q+) are mandatory}{$endif}
 
 uses
-  {$ifdef UNIX} cthreads, {$endif}
+  {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, prablake3, praformat, praraster, pracodec, prapack, prafs, pracpu;
+  SysUtils, Classes, prablake3, praformat, praraster, pracodec, prapack, prafs, pracpu, prathread,
+  { the commands for reporting and checking (doc/CLI.md); the info
+    providers register themselves }
+  prastage, prainfo, prainforaster, prasysinfo, prareport, prabench, praselftest,
+  praconsole;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -25,18 +35,31 @@ const
   MAX_INPUT = QWord(1) shl 31;
 
 type
-  TCommand = (cmNone, cmCompress, cmExtract, cmList);
+  TCommand = (cmNone, cmCompress, cmExtract, cmList, cmTest, cmInfo, cmReport, cmBench, cmSelftest);
 
 var
   command: TCommand;
   inputs: TStringList;
   outArg: string;          { -o: a name, or a directory }
   outDir: string;          { --output-dir }
-  force, keepCorrupt, dryRun, quiet: Boolean;
+  force, keepCorrupt, dryRun, quiet, noVerify, cleanTemps: Boolean;
   threads: Integer;
+  { --stats, --json; report's --with-file; bench's -r }
+  stats, jsonOut, withFile: Boolean;
+  runs: Integer;
+  runsGiven: Boolean;
+  { -th or --threads given }
+  thGiven: Boolean;
+  { --cpu }
+  cpuGiven: Boolean;
+  cpuWanted: TCpuPath;
+  { files that met a bug (an exception that is not about the file) }
+  bugs: Integer;
+  bugFile: string;
   maxOutput: QWord;
   errors: Integer;
-  { threads per file: what is left of -th once the files are shared out }
+  { threads per file when the files are not shared out by size (one
+    worker); each job's own are TFileJob.threads }
   bandThreads: Integer;
 
 type
@@ -44,12 +67,29 @@ type
     in parallel, and their lines come out in the order of the inputs. }
   TFileJob = record
     name, outText, errText: string;
+    index: Integer;
     failed, done: Boolean;
+    { an exception that is a bug in PRA, not something about the file }
+    bug: Boolean;
+    { --json: the object of this file; errors: what failed, for it }
+    node: TInfoNode;
+    errors: string;
+    { the bytes read and written (the summary of --stats and --json) }
+    inBytes, outBytes: Int64;
+    { the input's size when the files were ordered (0: not looked at), and
+      the threads it was given for its bands (Work) }
+    size: Int64;
+    threads: Integer;
+    { its output handed to the committer (Defer): the job ends there }
+    deferred: Boolean;
   end;
   PFileJob = ^TFileJob;
 
 threadvar
   CurJob: PFileJob;
+
+var
+  jobs: array of TFileJob;
 
 var
   { the arguments, in UTF-8 on every system }
@@ -67,6 +107,8 @@ var w: PPWideChar; n, i: Integer;
 begin
   DefaultSystemCodePage := CP_UTF8;
   DefaultFileSystemCodePage := CP_UTF8;
+  { and what the RTL gives back (ExpandFileName, the names in its errors) }
+  DefaultRTLFileSystemCodePage := CP_UTF8;
   w := CommandLineToArgvW(GetCommandLineW, n);
   args := nil;
   SetLength(args, n);
@@ -120,11 +162,53 @@ procedure Fail(const msg: string);
 begin
   CurJob^.failed := True;
   CurJob^.errText := CurJob^.errText + 'pra: ' + msg + LineEnding;
+  if CurJob^.errors <> '' then CurJob^.errors := CurJob^.errors + '; ';
+  CurJob^.errors := CurJob^.errors + msg;
 end;
 
+{ a line for people: --json prints the file's object instead }
 procedure Say(const line: string);
 begin
+  if jsonOut then Exit;
   CurJob^.outText := CurJob^.outText + line + LineEnding;
+end;
+
+{ a field of the file's --json object }
+function JobNode: TInfoNode;
+begin
+  Result := CurJob^.node;
+end;
+
+{ an exception about the file or the system (a read, a write, memory),
+  not a bug in PRA }
+function NotABug(e: Exception): Boolean;
+begin
+  Result := (e is EInOutError) or (e is EStreamError) or (e is EOSError) or (e is EOutOfMemory);
+end;
+
+{ What could not be written to the output (a full disk, a closed pipe):
+  said once, and what is still in the buffer dropped, or the RTL would
+  fail on it again at the end with a runtime error }
+procedure OutputFailed(const why: string);
+begin
+  TextRec(Output).BufPos := 0;
+  InOutRes := 0;
+  Writeln(StdErr, 'pra: could not write the output: ', why);
+end;
+
+{ The end: the output flushed first, so that a write that fails says so
+  and ends with 1 (not a bug, and not 0) }
+procedure Finish(code: Integer);
+begin
+  try
+    Flush(Output);
+  except
+    on e: Exception do begin
+      OutputFailed(e.Message);
+      if code = 0 then code := 1;
+    end;
+  end;
+  Halt(code);
 end;
 
 procedure Usage(code: Integer);
@@ -135,18 +219,40 @@ begin
   Writeln('usage: pra a [options] FILE...     compress to .pra');
   Writeln('       pra x [options] FILE...     extract from .pra');
   Writeln('       pra list FILE...            show what each .pra holds');
+  Writeln('       pra t FILE...               test each .pra: extract and verify, write nothing');
+  Writeln('       pra info FILE...            the structure of each file, and what PRA does with it');
+  Writeln('       pra report [FILE] [-o REPORT.txt] [--with-file]');
+  Writeln('                                   a bug report (no pixels, no header contents) and');
+  Writeln('                                   a link to open an issue with it');
+  Writeln('       pra bench FILE... [-r N]    time a, a --no-verify and x (best of N runs)');
+  Writeln('       pra selftest                the samples inside pra, on every SIMD path here');
+  Writeln('       pra --version, -V           the build, the system and the SIMD path');
   Writeln;
   Writeln('  -o PATH              output name (one input), or directory (ends in / or exists)');
   Writeln('  --output-dir=DIR     output directory');
   Writeln('  -f, --force          replace an existing output (only with something that verified)');
   Writeln('  -th N, --threads=N   threads (default: the processors, up to 8): several');
-  Writeln('                       files at once, and what is left to each file''s bands');
+  Writeln('                       files at once, and spare ones to a large file''s bands');
   Writeln('  --max-output=SIZE    x: refuse a declared original above SIZE (256M; 0 = no limit)');
   Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
+  Writeln('  --no-verify          a: do not decompress the stream to check it before writing:');
+  Writeln('                       faster, but a codec bug would only show when extracting');
+  Writeln('                       (the hash catches it then)');
+  Writeln('  --no-sync            do not wait for each output to reach the disk: a few');
+  Writeln('                       percent faster, but a power cut may leave it empty');
+  Writeln('  --clean-temps        delete the temporaries an interrupted run left where');
+  Writeln('                       this one writes (only PRA''s, old, of no live process)');
   Writeln('  -n, --dry-run        do everything but write');
   Writeln('  -q, --quiet          only errors');
+  Writeln('  --stats              a, x, t: where each file''s time went, threads and bands');
+  Writeln('  --json               a, x, t, info, list: a JSON object per file, then a summary');
+  Writeln('  -r N                 bench: runs of each, the best counts (default 3)');
+  Writeln('  --cpu=PATH           the model''s SIMD path: plain or sse41 (same output)');
   Writeln('  --                   the rest are files');
-  Halt(code);
+  Writeln;
+  Writeln('exit status: 0 all went through, 1 a file failed, 2 usage error, 3 a bug in PRA');
+  Writeln('bugs: pra report FILE, then ', ISSUES_URL);
+  Finish(code);
 end;
 
 procedure UsageError(const msg: string);
@@ -176,6 +282,30 @@ begin
   Result := True;
 end;
 
+{ where the command is among the arguments (past a leading --cpu) }
+function CommandIndex: Integer;
+begin
+  Result := 1;
+  while (Result < ArgCount) and (Copy(args[Result], 1, 6) = '--cpu=') do Inc(Result);
+end;
+
+{ --cpu: the path asked for, or a usage error if this processor (or this
+  build) does not have it }
+procedure ApplyCpu;
+begin
+  if not cpuGiven then Exit;
+  if not SetCpuPath(cpuWanted) then
+    UsageError('--cpu=' + CPU_PATH_NAMES[cpuWanted] + ': this processor or this build does not have it; it has: ' +
+               SupportedPaths);
+end;
+
+{ "--cpu sse41": the value goes after an equals sign (next: where it is) }
+procedure CpuSpaced(next: Integer);
+begin
+  if next <= ArgCount then UsageError('"--cpu ' + args[next] + '": write --cpu=' + args[next])
+  else UsageError('--cpu needs a path: --cpu=plain or --cpu=sse41');
+end;
+
 procedure ParseArgs;
 var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
 
@@ -189,25 +319,47 @@ var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
 begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
-  threads := CpuCount;
-  if threads > 8 then threads := 8;
-  if threads < 1 then threads := 1;
+  noVerify := False; cleanTemps := False;
+  stats := False; jsonOut := False; withFile := False; runs := 3; runsGiven := False; thGiven := False;
+  cpuGiven := False;
+  threads := DefaultThreads;
   maxOutput := DEFAULT_MAX_OUTPUT;
   ReadArgs;
+  SetupStdText;   { UTF-8 out, every character on a Windows console (praconsole) }
   if ArgCount = 0 then Usage(2);
-  a := args[1];
+  { --cpu may come before the command too }
+  i := 1;
+  while (i < ArgCount) and (Copy(args[i], 1, 6) = '--cpu=') do begin
+    if not ParseCpuPath(Copy(args[i], 7, MaxInt), cpuWanted) then
+      UsageError('--cpu: plain or sse41, not "' + Copy(args[i], 7, MaxInt) + '"');
+    cpuGiven := True;
+    Inc(i);
+  end;
+  a := args[i];
+  if a = '--cpu' then CpuSpaced(i + 1);
   if (a = '-h') or (a = '--help') then Usage(0);
-  if a = '--version' then begin Writeln('pra ', PRA_VERSION); Halt(0); end;
+  if (a = '--version') or (a = '-V') then begin
+    ApplyCpu;
+    Writeln('pra ', PRA_VERSION);
+    Write(SystemText(False));
+    Finish(0);
+  end;
   if a = 'a' then command := cmCompress
   else if a = 'x' then command := cmExtract
   else if a = 'list' then command := cmList
-  else UsageError('unknown command "' + a + '": a, x or list');
+  else if a = 't' then command := cmTest
+  else if a = 'info' then command := cmInfo
+  else if a = 'report' then command := cmReport
+  else if a = 'bench' then command := cmBench
+  else if a = 'selftest' then command := cmSelftest
+  else UsageError('unknown command "' + a + '": a, x, list, t, info, report, bench or selftest');
   onlyFiles := False;
-  i := 2;
+  i := i + 1;
   while i <= ArgCount do begin
     a := args[i];
     if onlyFiles or (a = '') or (a[1] <> '-') or (a = '-') then inputs.Add(a)
     else if a = '--' then onlyFiles := True
+    else if a = '--cpu' then CpuSpaced(i + 1)
     else if (a = '-h') or (a = '--help') then Usage(0)
     else if a = '-o' then outArg := NextValue
     else if Copy(a, 1, 13) = '--output-dir=' then outDir := Copy(a, 14, MaxInt)
@@ -215,24 +367,59 @@ begin
     else if (a = '-n') or (a = '--dry-run') then dryRun := True
     else if (a = '-q') or (a = '--quiet') then quiet := True
     else if a = '--keep-corrupt' then keepCorrupt := True
-    else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
+    else if a = '--no-verify' then noVerify := True
+    else if a = '--clean-temps' then cleanTemps := True
+    else if a = '--no-sync' then SyncToDisk := False
+    else if a = '--stats' then stats := True
+    else if a = '--json' then jsonOut := True
+    else if a = '--with-file' then withFile := True
+    else if Copy(a, 1, 6) = '--cpu=' then begin
+      if not ParseCpuPath(Copy(a, 7, MaxInt), cpuWanted) then
+        UsageError('--cpu: plain or sse41, not "' + Copy(a, 7, MaxInt) + '"');
+      cpuGiven := True;
+    end else if a = '-r' then begin
+      v := NextValue;
+      if not TryStrToInt(v, n) or (n < 1) or (n > 1000) then UsageError('-r: a number from 1 to 1000, not "' + v + '"');
+      runs := n;
+      runsGiven := True;
+    end else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
       if a = '-th' then v := NextValue else v := Copy(a, 11, MaxInt);
       if not TryStrToInt(v, n) or (n < 1) or (n > 64) then UsageError('threads: a number from 1 to 64, not "' + v + '"');
       threads := n;
+      thGiven := True;
     end else if Copy(a, 1, 13) = '--max-output=' then begin
       if not ParseSize(Copy(a, 14, MaxInt), maxOutput) then
         UsageError('--max-output: a size like 256M, 1G or 0, not "' + Copy(a, 14, MaxInt) + '"');
       if maxOutput = 0 then maxOutput := High(QWord);
     end
-    { a glued value: say what to write instead }
+    { glued values were the old packJPG spelling: say what to write instead }
     else if Copy(a, 1, 3) = '-th' then UsageError('"' + a + '": write -th ' + Copy(a, 4, MaxInt))
     else UsageError('unknown option "' + a + '"');
     Inc(i);
   end;
   {$ifdef MSWINDOWS} ExpandWildcards; {$endif}
-  if inputs.Count = 0 then UsageError('no input files');
+  if (inputs.Count = 0) and not (command in [cmReport, cmSelftest]) then UsageError('no input files');
   if (outArg <> '') and (outDir <> '') then UsageError('-o and --output-dir together');
-  if (command = cmList) and ((outArg <> '') or (outDir <> '')) then UsageError('list writes nothing');
+  if (command in [cmList, cmTest, cmInfo, cmBench, cmSelftest]) and ((outArg <> '') or (outDir <> '')) then
+    UsageError(args[CommandIndex] + ' writes nothing');
+  if noVerify and (command <> cmCompress) then UsageError('--no-verify is for a');
+  if stats and not (command in [cmCompress, cmExtract, cmTest]) then UsageError('--stats is for a, x and t');
+  if jsonOut and not (command in [cmCompress, cmExtract, cmTest, cmInfo, cmList]) then
+    UsageError('--json is for a, x, t, info and list');
+  if withFile and (command <> cmReport) then UsageError('--with-file is for report');
+  if withFile and (inputs.Count = 0) then UsageError('--with-file copies the FILE of the report: give one');
+  if runsGiven and (command <> cmBench) then UsageError('-r is for bench');
+  if (command in [cmTest, cmInfo, cmReport, cmBench, cmSelftest]) and (force or dryRun or keepCorrupt) then
+    UsageError('-f, -n and --keep-corrupt are for a and x');
+  { durable writes: list, t, info and selftest write nothing; bench and
+    report write, but only their own files (bench in a directory of its own) }
+  if (cleanTemps or not SyncToDisk) and (command in [cmList, cmTest, cmInfo, cmSelftest]) then
+    UsageError(args[CommandIndex] + ' writes nothing');
+  if cleanTemps and not (command in [cmCompress, cmExtract]) then UsageError('--clean-temps is for a and x');
+  if (command = cmReport) and (outDir <> '') then UsageError('report: -o names the report');
+  if (command = cmReport) and (inputs.Count > 1) then UsageError('report takes one file');
+  if (command = cmSelftest) and (inputs.Count > 0) then UsageError('selftest takes no files: its samples are inside');
+  if (command = cmSelftest) and thGiven then UsageError('selftest picks its own threads (1 and 2)');
 end;
 
 function ReadWhole(const f: string; out data: TBytes): Boolean;
@@ -245,6 +432,7 @@ begin
   { a pattern still here matched nothing (no Windows name has * or ?) }
   if LastDelimiter('*?', f) > 0 then begin Fail(f + ': no file matches'); Exit; end;
   {$endif}
+  StageEnter(stRead);
   try
     s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone);
     try
@@ -255,9 +443,11 @@ begin
       s.Free;
     end;
     Result := True;
+    CurJob^.inBytes := Length(data);
   except
     on e: Exception do Fail(f + ': ' + e.Message);
   end;
+  StageEnter(stNone);
 end;
 
 function EndsWithSeparator(const s: string): Boolean;
@@ -293,18 +483,106 @@ begin
   else Result := IntToStr(n) + ' B';
 end;
 
-{ Writes data under path, which must verify against `expected`. }
-function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
-var r: TFsResult; o: TOutcome; om: TOnMismatch;
+var
+  { every output this run has taken, and every input, by PathKey; Objects
+    is the job's index }
+  outKeys, inKeys: TStringList;
+  claimLock: TRTLCriticalSection;
+
+{ The same file for the same text: absolute, without . and .., and on
+  Windows without case. Links are not resolved. }
+function PathKey(const p: string): string;
+begin
+  Result := ExpandFileName(p);
+  {$ifdef MSWINDOWS} Result := UTF8Encode(WideLowerCase(UTF8Decode(Result))); {$endif}
+end;
+
+function NewKeyList: TStringList;
+begin
+  Result := TStringList.Create;
+  Result.CaseSensitive := True;
+  Result.UseLocale := False;
+  Result.Duplicates := dupAccept;
+  Result.Sorted := True;
+end;
+
+{ Takes path as the output of the current job. Without this, with -f two
+  inputs with the same output (a.ppm and a.pnm, or the same name from two
+  folders with --output-dir) both said they were written, and only the last
+  one was there; one could also replace another job's input before it was
+  read. False, and the job failed, if the path is another job's. }
+function Claim(const path: string): Boolean;
+var key: string; i, j, k: Integer;
+begin
+  key := PathKey(path); k := CurJob^.index;
+  Result := False;
+  EnterCriticalSection(claimLock);
+  try
+    if outKeys.Find(key, i) then begin
+      j := PtrInt(outKeys.Objects[i]);
+      if j <> k then begin Fail(path + ': also the output of ' + jobs[j].name + ' in this run'); Exit; end;
+      Exit(True);
+    end;
+    if inKeys.Find(key, i) then begin
+      while (i > 0) and (inKeys[i - 1] = key) do Dec(i);
+      while (i < inKeys.Count) and (inKeys[i] = key) do begin
+        if PtrInt(inKeys.Objects[i]) <> k then begin Fail(path + ': also an input of this run'); Exit; end;
+        Inc(i);
+      end;
+    end;
+    outKeys.AddObject(key, TObject(PtrInt(k)));
+    Result := True;
+  finally
+    LeaveCriticalSection(claimLock);
+  end;
+end;
+
+{ Anything under that name, a link that leads nowhere included (FileExists
+  follows links, and a dangling one said no where the write then failed) }
+function Exists(const path: string): Boolean;
+{$ifdef UNIX} var st: Stat; {$endif}
+begin
+  {$ifdef UNIX}
+  Result := fpLstat(path, st) = 0;
+  {$else}
+  Result := FileExists(path) or DirectoryExists(path);
+  {$endif}
+end;
+
+{ Save's checks before the write: the name taken in this run, what an
+  interrupted run left, an existing file without -f }
+function SaveCheck(const path: string): Boolean;
+var note: string;
 begin
   Result := False;
-  if dryRun then Exit(True);
-  if not force and (FileExists(path) or DirectoryExists(path)) then begin
+  if not Claim(path) then Exit;
+  { what an interrupted run left in this directory: a notice, not a failure }
+  note := CheckLeftovers(path, cleanTemps and not dryRun);
+  if note <> '' then CurJob^.errText := CurJob^.errText + 'pra: ' + note + LineEnding;
+  { -n checks this too: it said yes to what the real run then refused }
+  if not force and Exists(path) then begin
     Fail(path + ': already exists (-f to replace it)');
     Exit;
   end;
+  Result := True;
+end;
+
+{ Save's write, after SaveCheck }
+function SaveWrite(const path: string; const data: TBytes; const expected: THash16): Boolean;
+var r: TFsResult; o: TOutcome; om: TOnMismatch;
+begin
+  Result := False;
   if keepCorrupt then om := omKeep else om := omDelete;
+  StageEnter(stWrite);
   r := WriteVerified(path, data, expected, om, force, o);
+  StageEnter(stNone);
+  { in place and whole, but its name may not survive a power cut }
+  if r.error = feNotSynced then begin
+    Fail(o.path + ': written, but its directory could not be flushed to the disk: ' +
+         SysErrorMessage(r.code) + ' (' + r.Text + ')');
+    if o.kind = ocKept then Fail(path + ': does not verify; kept as ' + o.path);
+    Exit;
+  end;
   if not r.Ok then begin
     { the system's own words for its error, and its number }
     if r.code >= 0 then Fail(path + ': could not write it: ' + SysErrorMessage(r.code) + ' (' + r.Text + ')')
@@ -318,9 +596,199 @@ begin
   end;
 end;
 
+{ Writes data under path, which must verify against `expected`. }
+function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
+begin
+  Result := SaveCheck(path);
+  if Result and not dryRun then Result := SaveWrite(path, data, expected);
+end;
+
+
 function StoredNote(const pra: TBytes): string;
 begin
   if (Length(pra) > 5) and ((pra[5] and FLAG_STORED) <> 0) then Result := '  (stored as is)' else Result := '';
+end;
+
+{ --stats: where the file's time went (prastage), and the threads and
+  bands; pra is the .pra written or read }
+procedure StatsOf(const pra: TBytes);
+var t: TStageTimes; st: TStage; o: TInfoNode; p: TPra; bands: Integer; line: string; total: Double;
+begin
+  if not stats then Exit;
+  t := StageTimes;
+  bands := 0;
+  if Open(pra, p).Ok and not p.stored then begin
+    if p.orig_size <= maxOutput then bands := StreamBands(p.payload, Int64(p.orig_size));
+  end;
+  o := JobNode.Obj('stats');
+  line := '';
+  total := 0;
+  for st := Low(TStage) to High(TStage) do
+    if t[st] > 0 then begin
+      total := total + t[st];
+      o.Fixed(STAGE_NAMES[st] + '_ms', t[st] * 1000, 3);
+      if line <> '' then line := line + ', ';
+      line := line + STAGE_NAMES[st] + ' ' + DotNumber(t[st] * 1000, 2) + ' ms';
+    end;
+  o.Fixed('total_ms', total * 1000, 3);
+  o.Num('threads', CurJob^.threads);
+  o.Num('bands', bands);
+  { with -q the file's own line is not there: the stats name it }
+  if not jsonOut and quiet then CurJob^.outText := CurJob^.outText + CurJob^.name + ':' + LineEnding;
+  if not jsonOut then
+    CurJob^.outText := CurJob^.outText + '  stats: ' + line + '; total ' + DotNumber(total * 1000, 2) + ' ms; ' +
+                       IntToStr(CurJob^.threads) + ' thread(s), ' + IntToStr(bands) + ' band(s)' + LineEnding;
+end;
+
+{ The committer (0.9.7): a file's write, flushed to the disk before it
+  takes its name (prafs), waits about 16 ms on a SATA SSD, a tenth of a
+  small image's extraction on one thread. So when every write is flushed and
+  --stats does not time it, the worker checks the name (SaveCheck) and
+  hands the write and the rest of the job (its line, its --json object) to
+  one thread that does them in turn, and goes on to the next file: the same
+  files, lines and order, the flush beside the next file's work. At most
+  MAX_PENDING writes wait (their bytes are held). }
+type
+  TDoneKind = (dkCompress, dkExtract);
+  TPending = record
+    k: Integer;
+    kind: TDoneKind;
+    path, f, note: string;
+    data: TBytes;
+    expected: THash16;
+    inLen: Int64;
+  end;
+  TCommitter = class(TJoinThread)
+    procedure Execute; override;
+  end;
+
+const
+  MAX_PENDING = 8;
+
+var
+  asyncCommit: Boolean = False;
+  pend: array[0..MAX_PENDING - 1] of TPending;
+  pendHead, pendCount: Integer;
+  pendStop: Boolean;
+  pendLock: TRTLCriticalSection;
+  pendWake, pendRoom: PRTLEvent;
+  committer: TCommitter = nil;
+
+procedure FinishJob(k: Integer); forward;
+
+{ what a written .pra or original adds to its job }
+procedure CompressDone(const f, path: string; origLen: Int64; const pra: TBytes; const note: string);
+begin
+  CurJob^.outBytes := Length(pra);
+  JobNode.Str('output', path);
+  JobNode.Num('original_size', origLen);
+  JobNode.Num('pra_size', Length(pra));
+  if origLen > 0 then JobNode.Fixed('ratio_percent', 100 * Length(pra) / origLen);
+  JobNode.Bool('stored', StoredNote(pra) <> '');
+  if not quiet then
+    Say(f + ' -> ' + path + '  ' + Human(origLen) + ' -> ' + Human(Length(pra)) +
+        Format('  %.2f%%', [100 * Length(pra) / origLen]) +
+        { the codec would not have made it smaller }
+        StoredNote(pra) + note);
+end;
+
+procedure ExtractDone(const f, path: string; const orig: TBytes; praLen: Int64);
+begin
+  CurJob^.outBytes := Length(orig);
+  JobNode.Str('output', path);
+  JobNode.Num('original_size', Length(orig));
+  JobNode.Num('pra_size', praLen);
+  if not quiet then Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
+end;
+
+{ the job's write and end to the committer; waits while MAX_PENDING wait }
+procedure Defer(kind: TDoneKind; const f, path: string; const data: TBytes; const expected: THash16;
+  inLen: Int64; const note: string);
+var i: Integer;
+begin
+  CurJob^.deferred := True;
+  repeat
+    EnterCriticalSection(pendLock);
+    if pendCount < MAX_PENDING then begin
+      i := (pendHead + pendCount) mod MAX_PENDING;
+      pend[i].k := CurJob^.index; pend[i].kind := kind;
+      pend[i].f := f; pend[i].path := path; pend[i].note := note;
+      pend[i].data := data; pend[i].expected := expected; pend[i].inLen := inLen;
+      Inc(pendCount);
+      LeaveCriticalSection(pendLock);
+      RTLEventSetEvent(pendWake);
+      Exit;
+    end;
+    LeaveCriticalSection(pendLock);
+    RTLEventWaitFor(pendRoom, 50);
+  until False;
+end;
+
+procedure TCommitter.Execute;
+var p: TPending; have: Boolean;
+begin
+  SetupStdText;   { this thread's own Output and StdErr (praconsole) }
+  repeat
+    EnterCriticalSection(pendLock);
+    have := pendCount > 0;
+    if have then begin
+      p := pend[pendHead];
+      pend[pendHead].data := nil;
+      pendHead := (pendHead + 1) mod MAX_PENDING;
+      Dec(pendCount);
+    end;
+    LeaveCriticalSection(pendLock);
+    if not have then begin
+      if pendStop then Break;
+      RTLEventWaitFor(pendWake, 50);
+      Continue;
+    end;
+    RTLEventSetEvent(pendRoom);
+    CurJob := @jobs[p.k];
+    try
+      if SaveWrite(p.path, p.data, p.expected) then
+        case p.kind of
+          dkCompress: CompressDone(p.f, p.path, p.inLen, p.data, p.note);
+          dkExtract: ExtractDone(p.f, p.path, p.data, p.inLen);
+        end;
+    except
+      on e: Exception do begin
+        if not NotABug(e) then begin
+          jobs[p.k].bug := True;
+          Fail(jobs[p.k].name + ': internal error: ' + e.ClassName + ': ' + e.Message);
+        end else Fail(jobs[p.k].name + ': ' + e.ClassName + ': ' + e.Message);
+      end;
+    end;
+    p.data := nil;
+    FinishJob(p.k);
+  until False;
+end;
+
+procedure StartCommitter;
+begin
+  InitCriticalSection(pendLock);
+  pendWake := RTLEventCreate; pendRoom := RTLEventCreate;
+  pendHead := 0; pendCount := 0; pendStop := False;
+  try
+    committer := TCommitter.Create(False);
+  except
+    on EThread do committer := nil;
+  end;
+  asyncCommit := committer <> nil;
+end;
+
+{ every write done and every job ended }
+procedure StopCommitter;
+begin
+  if committer = nil then Exit;
+  EnterCriticalSection(pendLock);
+  pendStop := True;
+  LeaveCriticalSection(pendLock);
+  RTLEventSetEvent(pendWake);
+  committer.Join;
+  committer.Free;
+  committer := nil;
+  asyncCommit := False;
 end;
 
 procedure CompressOne(const f: string);
@@ -329,18 +797,19 @@ begin
   if not ReadWhole(f, d) then Exit;
   if IsPra(d) then begin Fail(f + ': already a .pra'); Exit; end;
   { the extension, as it is written, for x to give it back }
-  r := Pack(d, pra, Copy(ExtractFileExt(f), 2, MaxInt), bandThreads);
+  r := Pack(d, pra, CurJob^.threads, not noVerify, Copy(ExtractFileExt(f), 2, MaxInt));
   if not r.Ok then begin
     if r.err = ukNotRaster then Fail(f + ': not an image PRA takes (' + r.why + ')')
     else Fail(f + ': ' + r.Text);
     Exit;
   end;
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.pra'));
-  if Save(path, pra, Blake3_128(pra)) and not quiet then
-    Say(f + ' -> ' + path + '  ' + Human(Length(d)) + ' -> ' + Human(Length(pra)) +
-        Format('  %.2f%%', [100 * Length(pra) / Length(d)]) +
-        { the codec would not have made it smaller }
-        StoredNote(pra));
+  if asyncCommit then begin
+    if SaveCheck(path) then Defer(dkCompress, f, path, pra, Blake3_128(pra), Length(d), '');
+    Exit;
+  end;
+  if Save(path, pra, Blake3_128(pra)) then CompressDone(f, path, Length(d), pra, '');
+  StatsOf(pra);
 end;
 
 { the extension of an image by its content, for a .pra that keeps none }
@@ -388,23 +857,88 @@ procedure ExtractOne(const f: string);
 var d, orig: TBytes; r: TPackResult; path, ext: string; h: THash16;
 begin
   if not ReadWhole(f, d) then Exit;
-  r := Unpack(d, maxOutput, orig, h, bandThreads);
+  r := Unpack(d, maxOutput, orig, h, CurJob^.threads);
   if r.err = ukTooLarge then begin
     Fail(f + ': the original is larger than --max-output'); Exit;
   end;
-  if not (r.Ok or (r.err = ukHashMismatch)) then begin Fail(f + ': ' + r.Text); Exit; end;
-  { the original's own extension; without one, by the content }
+  { a size that does not match is kept with --keep-corrupt, as a hash that
+    does not match is: what was decoded, under another name }
+  if (r.err = ukSizeMismatch) and not keepCorrupt then begin Fail(f + ': ' + r.Text); Exit; end;
+  if not (r.Ok or (r.err = ukHashMismatch) or (r.err = ukSizeMismatch)) then begin Fail(f + ': ' + r.Text); Exit; end;
+  { -n does everything but write: a hash that does not match fails it as
+    it fails x (Save, which -n stops before, is where x finds it) }
+  if dryRun and not r.Ok then begin Fail(f + ': does not verify (' + r.Text + ')'); Exit; end;
+  { its contents may even match the hash, but the descriptor is damaged:
+    never under the good name, so Save is given a hash it cannot match }
+  if r.err = ukSizeMismatch then begin h := Blake3_128(orig); h[0] := h[0] xor 1; end;
+  { the original's own extension; a .pra without one (version 3) by the content }
   if r.ext <> '' then ext := '.' + r.ext else ext := ExtensionOf(orig);
   path := OutputPath(f, ChangeFileExt(ExtractFileName(f), ext));
   { a hash that does not match goes through Save as well: it deletes it, or
     keeps it under another name with --keep-corrupt }
-  if Save(path, orig, h) and not quiet then
-    Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
+  if asyncCommit then begin
+    if SaveCheck(path) then Defer(dkExtract, f, path, orig, h, Length(d), '');
+    Exit;
+  end;
+  if Save(path, orig, h) then ExtractDone(f, path, orig, Length(d));
+  StatsOf(d);
+end;
+
+{ t: what x does, without writing: the size and the hash checked }
+procedure TestOne(const f: string);
+var d, orig: TBytes; r: TPackResult; h: THash16;
+begin
+  if not ReadWhole(f, d) then Exit;
+  if not IsPra(d) then begin Fail(f + ': FAILED: not a .pra'); Exit; end;
+  r := Unpack(d, maxOutput, orig, h, CurJob^.threads);
+  StageEnter(stNone);
+  if r.err = ukTooLarge then begin Fail(f + ': FAILED: the original is larger than --max-output'); Exit; end;
+  if not r.Ok then begin Fail(f + ': FAILED: ' + r.Text); Exit; end;
+  CurJob^.outBytes := Length(orig);
+  JobNode.Num('original_size', Length(orig));
+  JobNode.Num('pra_size', Length(d));
+  if not quiet then Say(f + ': OK  ' + Human(Length(orig)) + ', size and BLAKE3-128 verified');
+  StatsOf(d);
+end;
+
+{ info: the structure, and what PRA does with it }
+procedure InfoOne(const f: string);
+var d: TBytes; n, bug: TInfoNode; sl: TStringList;
+begin
+  if not ReadWhole(f, d) then Exit;
+  n := DescribeFile(f, d, False, CurJob^.threads, maxOutput, idDefault);
+  bug := n.Find('internal_error');
+  if bug <> nil then begin
+    CurJob^.bug := True;
+    Fail(f + ': internal error: ' + bug.value);
+  end;
+  if jsonOut then begin
+    CurJob^.node.Free;
+    CurJob^.node := n;
+    Exit;
+  end;
+  sl := TStringList.Create;
+  try
+    n.Render(sl, 2);
+    sl.Delete(0);
+    sl.Insert(0, f);
+    Say(TrimRight(sl.Text));
+  finally
+    sl.Free;
+    n.Free;
+  end;
 end;
 
 function ExtNote(const ext: string): string;
 begin
   if ext = '' then Result := '' else Result := ', as .' + ext;
+end;
+
+{ a stream of several images }
+function KindNote(const p: TPra): string;
+begin
+  if not p.stored and (Length(p.payload) > 0) and (p.payload[0] = PARTS_STREAM) then Result := ', parts'
+  else Result := '';
 end;
 
 procedure ListOne(const f: string);
@@ -415,27 +949,81 @@ begin
   if not r.Ok then begin Fail(f + ': ' + r.Text); Exit; end;
   hex := '';
   for i := 0 to 15 do hex := hex + LowerCase(IntToHex(p.hash[i], 2));
+  JobNode.Num('original_size', p.orig_size);
+  JobNode.Num('pra_size', Length(d));
+  JobNode.Fixed('ratio_percent', 100 * Length(d) / p.orig_size);
+  JobNode.Bool('stored', p.stored);
+  JobNode.Str('extension', p.ext);
+  JobNode.Str('blake3_128', hex);
   Say(f + '  original ' + IntToStr(p.orig_size) + ' B, .pra ' + IntToStr(Length(d)) + ' B' +
-      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + ExtNote(p.ext) + '  blake3-128 ' + hex);
+      Format(' (%.2f%%)', [100 * Length(d) / p.orig_size]) + StoredNote(d) + ExtNote(p.ext) + KindNote(p) + '  blake3-128 ' + hex);
 end;
 
 var
-  jobs: array of TFileJob;
   nextJob, nextPrint: LongInt;
+  { the jobs in the order the workers take them }
+  order: array of Integer;
   printLock: TRTLCriticalSection;
+  { the bytes every file read and wrote, for the summary }
+  sumIn, sumOut: Int64;
+  { what writing the output met, '' if nothing }
+  outputError: string;
+
+{ PRA_TEST_CRASH=range or access: a bug on purpose (cli.sh checks how the
+  command ends then) }
+var crashTarget: PInteger = nil;
+
+procedure CrashTest;
+var w: string;
+begin
+  w := GetEnvironmentVariable('PRA_TEST_CRASH');
+  if w = 'range' then raise ERangeError.Create('Range check error (PRA_TEST_CRASH)');
+  if w = 'access' then crashTarget^ := 1;
+end;
 
 procedure RunJob(k: Integer);
 begin
   CurJob := @jobs[k];
+  jobs[k].node := TInfoNode.Create(ikObject);
+  jobs[k].node.Str('file', jobs[k].name);
+  StageReset;
   try
-    case command of
-      cmCompress: CompressOne(jobs[k].name);
-      cmExtract: ExtractOne(jobs[k].name);
-      cmList: ListOne(jobs[k].name);
+    { failed before starting: its output is another input's }
+    if not jobs[k].failed then begin
+      CrashTest;
+      case command of
+        cmCompress: CompressOne(jobs[k].name);
+        cmExtract: ExtractOne(jobs[k].name);
+        cmList: ListOne(jobs[k].name);
+        cmTest: TestOne(jobs[k].name);
+        cmInfo: InfoOne(jobs[k].name);
+      end;
     end;
   except
-    on e: Exception do Fail(jobs[k].name + ': ' + e.ClassName + ': ' + e.Message);
+    on e: Exception do begin
+      if not NotABug(e) then begin
+        jobs[k].bug := True;
+        Fail(jobs[k].name + ': internal error: ' + e.ClassName + ': ' + e.Message);
+      end else Fail(jobs[k].name + ': ' + e.ClassName + ': ' + e.Message);
+    end;
   end;
+  { the committer ends it }
+  if jobs[k].deferred then Exit;
+  FinishJob(k);
+end;
+
+{ a job's --json object, and its lines printed when it is next in line }
+procedure FinishJob(k: Integer);
+begin
+  if jsonOut then begin
+    { info's "ok": the file was read and described (what PRA does with
+      it is under "pra") }
+    jobs[k].node.Bool('ok', not jobs[k].failed);
+    if jobs[k].errors <> '' then jobs[k].node.Str('error', jobs[k].errors);
+    if jobs[k].bug and (jobs[k].node.Find('internal_error') = nil) then jobs[k].node.Bool('internal_error', True);
+    jobs[k].outText := jobs[k].node.Json + LineEnding;
+  end;
+  FreeAndNil(jobs[k].node);
   { print every finished job that is next in line }
   EnterCriticalSection(printLock);
   try
@@ -444,9 +1032,26 @@ begin
       { Output and StdErr are per thread in FPC, each with its own buffer:
         flushed here, inside the lock, or a worker's lines would come out
         when it ends }
-      if jobs[nextPrint].outText <> '' then begin Write(jobs[nextPrint].outText); Flush(Output); end;
+      { the output that cannot be written (a full disk) is said once, at
+        the end, and the rest of the run goes on without it }
+      if (jobs[nextPrint].outText <> '') and (outputError = '') then
+        try
+          Write(jobs[nextPrint].outText); Flush(Output);
+        except
+          on e: Exception do begin
+            TextRec(Output).BufPos := 0;
+            InOutRes := 0;
+            outputError := e.Message;
+          end;
+        end;
       if jobs[nextPrint].errText <> '' then begin Write(StdErr, jobs[nextPrint].errText); Flush(StdErr); end;
       if jobs[nextPrint].failed then Inc(errors);
+      if jobs[nextPrint].bug then begin
+        if bugs = 0 then bugFile := jobs[nextPrint].name;
+        Inc(bugs);
+      end;
+      Inc(sumIn, jobs[nextPrint].inBytes);
+      Inc(sumOut, jobs[nextPrint].outBytes);
       jobs[nextPrint].outText := ''; jobs[nextPrint].errText := '';
       Inc(nextPrint);
     end;
@@ -455,53 +1060,315 @@ begin
   end;
 end;
 
-{ takes the next input until none is left }
-procedure Work;
-var k: LongInt;
+{ The -th threads as tokens: a worker holds one while it runs a file, and
+  a file may take more of those free when it starts, for its bands: as
+  many as its share of the bytes not yet started is of -th, at least one.
+  The largest files go first (ScheduleJobs) and the last ones take what the
+  others left: a set whose largest file is a third of its bytes no longer
+  waits for it on one thread at the end (gap1's 46 MB codestream, -th 8).
+  Threads change no output. With one worker, the file takes every thread,
+  as before. }
+var
+  tokLock: TRTLCriticalSection;
+  tokFree: Integer;          { tokens no worker holds }
+  tokWake: PRTLEvent;        { set when tokens come back }
+  restBytes: Int64;          { the sizes of the files not yet started }
+
+{ one token for this worker, waiting for one if none is free }
+procedure TokenTake;
 begin
   repeat
-    k := InterlockedIncrement(nextJob) - 1;
-    if k >= Length(jobs) then Break;
-    RunJob(k);
+    EnterCriticalSection(tokLock);
+    if tokFree > 0 then begin
+      Dec(tokFree);
+      LeaveCriticalSection(tokLock);
+      Exit;
+    end;
+    LeaveCriticalSection(tokLock);
+    RTLEventWaitFor(tokWake, 50);
   until False;
 end;
 
+procedure TokenGive(n: Integer);
+begin
+  EnterCriticalSection(tokLock);
+  Inc(tokFree, n);
+  LeaveCriticalSection(tokLock);
+  RTLEventSetEvent(tokWake);
+end;
+
+{ takes the next input until none is left }
+procedure Work;
+var k: LongInt; want, extra: Integer; sz, w64: Int64;
+begin
+  repeat
+    TokenTake;
+    EnterCriticalSection(tokLock);
+    k := nextJob;
+    if k < Length(jobs) then begin
+      Inc(nextJob);
+      sz := jobs[order[k]].size;
+      { its share of what is left, in threads, rounded up }
+      if (restBytes > 0) and (sz > 0) then begin
+        w64 := (Int64(threads) * sz + restBytes - 1) div restBytes;
+        if w64 > threads then w64 := threads;
+        want := Integer(w64);
+        restBytes := restBytes - sz;
+      end else want := bandThreads;
+      if want < 1 then want := 1;
+      extra := want - 1;
+      if extra > tokFree then extra := tokFree;
+      Dec(tokFree, extra);
+      jobs[order[k]].threads := 1 + extra;
+    end;
+    LeaveCriticalSection(tokLock);
+    if k >= Length(jobs) then begin TokenGive(1); Break; end;
+    RunJob(order[k]);
+    TokenGive(jobs[order[k]].threads);
+  until False;
+end;
+
+{ With several workers the largest files go first (by the size of the
+  input: the image for a, the .pra for x and l), so that no big file is left
+  for the end while the other threads wait: on 30 photos of sizes 10x apart,
+  in name order, -th 8 took up to a fifth longer. A file that cannot be
+  read counts as 0 and goes last. The lines still come out in the order of
+  the inputs (nextPrint), and with one worker nothing changes, so x's
+  outputs are taken in the input order there, as before. }
+procedure ScheduleJobs(workers: Integer);
+var i, j, t: Integer; size: array of Int64; sr: TSearchRec;
+begin
+  order := nil; size := nil;
+  SetLength(order, Length(jobs)); SetLength(size, Length(jobs));
+  restBytes := 0;
+  for i := 0 to High(jobs) do begin
+    order[i] := i; size[i] := 0;
+    if (workers > 1) and (FindFirst(jobs[i].name, faAnyFile, sr) = 0) then begin
+      size[i] := sr.Size; FindClose(sr);
+    end;
+    if size[i] < 0 then size[i] := 0;
+    jobs[i].size := size[i];
+    jobs[i].threads := bandThreads;
+    restBytes := restBytes + size[i];
+  end;
+  { stable insertion sort, largest first: the same order every run }
+  for i := 1 to High(order) do begin
+    t := order[i]; j := i - 1;
+    while (j >= 0) and (size[order[j]] < size[t]) do begin order[j + 1] := order[j]; Dec(j); end;
+    order[j + 1] := t;
+  end;
+end;
+
 type
-  TWorker = class(TThread)
+  TWorker = class(TJoinThread)
     procedure Execute; override;
   end;
 
 procedure TWorker.Execute;
 begin
+  SetupStdText;
   Work;
 end;
 
-var i, workers: Integer; pool: array of TWorker;
+{ the end of a run that met a bug: what to do about it }
+procedure BugNote(const f: string);
+var name: string;
 begin
-  errors := 0;
+  name := f;
+  if name = '' then name := 'FILE';
+  if Pos(' ', name) > 0 then name := '"' + name + '"';
+  Writeln(StdErr, 'pra: This is a bug in PRA. Please run: pra report ', name, ' and open an issue at ', ISSUES_URL);
+end;
+
+{ pra report }
+function DoReport: Integer;
+var d: TBytes; f, title, text, url, copied, msg, dir: string; job: TFileJob; rest: array of string; i: Integer;
+    r: TFsResult; o: TOutcome; tb: TBytes; cut: Boolean;
+begin
+  Result := 0;
+  f := '';
+  d := nil;
+  job := Default(TFileJob);
+  CurJob := @job;
+  if inputs.Count > 0 then begin
+    f := inputs[0];
+    if not ReadWhole(f, d) then begin Write(StdErr, job.errText); Exit(1); end;
+  end;
+  rest := nil;
+  SetLength(rest, ArgCount);
+  for i := 1 to ArgCount do rest[i - 1] := args[i];
+  text := BuildReport(f, d, rest, threads, maxOutput, title);
+  url := IssueUrl(title, text, cut);
+  if outArg = '' then Write(text)
+  else begin
+    tb := nil;
+    SetLength(tb, Length(text));
+    if Length(text) > 0 then Move(text[1], tb[0], Length(text));
+    r := WriteVerified(outArg, tb, Blake3_128(tb), omDelete, force, o);
+    { whole and in place, but its name may not survive a power cut }
+    if r.error = feNotSynced then begin
+      Writeln(StdErr, 'pra: ', outArg, ': written, but its directory could not be flushed to the disk: ',
+              SysErrorMessage(r.code), ' (', r.Text, ')');
+      Exit(1);
+    end;
+    if not r.Ok then begin
+      if r.code >= 0 then Writeln(StdErr, 'pra: ', outArg, ': could not write it: ', SysErrorMessage(r.code), ' (', r.Text, ')')
+      else Writeln(StdErr, 'pra: ', outArg, ': could not write it (', r.Text, ')');
+      Exit(1);
+    end;
+    Writeln('pra: the report is in ', outArg);
+  end;
+  if withFile and (f <> '') then begin
+    if outArg <> '' then dir := ExtractFilePath(outArg) else dir := '';
+    copied := CopyBeside(f, d, dir, msg);
+    if copied = '' then begin Writeln(StdErr, 'pra: ', msg); Result := 1; end
+    else Writeln('pra: the file, to attach if you wish: ', copied,
+                 ' (GitHub takes .png, .jpg, .gif; zip anything else first)');
+  end;
+  Writeln;
+  if cut then
+    Writeln('Open an issue with this report (the link has room for part of it: paste the whole report ',
+            'in the issue, check it and add the steps):')
+  else Writeln('Open an issue with this report (the link holds it; check it and add the steps):');
+  Writeln(url);
+end;
+
+{ the summary of --stats and --json }
+procedure Summary(wall: Double);
+var o, s: TInfoNode; orig: Int64;
+begin
+  if jsonOut then begin
+    o := TInfoNode.Create(ikObject);
+    try
+      s := o.Obj('summary');
+      s.Str('command', args[CommandIndex]);
+      s.Num('files', Length(jobs));
+      s.Num('failed', errors);
+      s.Num('bugs', bugs);
+      s.Num('bytes_in', sumIn);
+      s.Num('bytes_out', sumOut);
+      s.Fixed('seconds', wall, 6);
+      s.Num('threads', threads);
+      Writeln(o.Json);
+    finally
+      o.Free;
+    end;
+  end else if stats then begin
+    { MB/s of the originals: what a reads, what x and t give }
+    if command = cmCompress then orig := sumIn else orig := sumOut;
+    Write('pra: ', Length(jobs), ' file(s), ', Human(sumIn), ' -> ', Human(sumOut), ', ',
+          DotNumber(wall * 1000, 2), ' ms, ', threads, ' thread(s)');
+    if wall > 0 then Write(', ', DotNumber(orig / (1024 * 1024) / wall, 2), ' MB/s');
+    Writeln;
+  end;
+end;
+
+var i, n, workers: Integer; pool: array of TWorker; path: string; started: Double;
+begin
+  { On Unix only '/' separates: the RTL's ExtractFileName and ChangeFileExt
+    also cut at '\', a plain character there, so 'a\x.ppm' and 'b\x.ppm'
+    both went to x.pra. (The extension kept is the same: one with '\' is
+    not one the format takes.) }
+  {$ifndef MSWINDOWS} AllowDirectorySeparators := ['/']; {$endif}
+  { the commit, from PRA_COMMIT at build time (as the plugin's; '' if not
+    set): here, in the program, which is compiled every time }
+  BuildCommit := {$I %PRA_COMMIT%};
+  BuildDate := {$I %DATE%};
+  errors := 0; bugs := 0; bugFile := ''; sumIn := 0; sumOut := 0; outputError := '';
+  try
   ParseArgs;
+  { before any write: report's and bench's too }
+  InstallInterruptCleanup;
+  ApplyCpu;
+  StagesOn := stats;
+  case command of
+    cmReport: Finish(DoReport);
+    cmBench: Finish(RunBench(inputs, runs, threads));
+    { --cpu: that path alone }
+    cmSelftest: Finish(RunSelftest(quiet, cpuGiven, cpuWanted));
+  end;
+  started := Seconds;
   if (outArg <> '') and (inputs.Count > 1) and not (DirectoryExists(outArg) or EndsWithSeparator(outArg)) then
     UsageError('-o with several inputs has to be a directory');
   jobs := nil;
   SetLength(jobs, inputs.Count);
+  InitCriticalSection(claimLock);
+  outKeys := NewKeyList; inKeys := NewKeyList;
   for i := 0 to inputs.Count - 1 do begin
     jobs[i] := Default(TFileJob);
     jobs[i].name := inputs[i];
+    jobs[i].index := i;
+    inKeys.AddObject(PathKey(inputs[i]), TObject(PtrInt(i)));
   end;
-  { the threads go to files first, and what is left to each file's bands }
+  { a's outputs follow from the names alone: taken here, in the order of the
+    inputs, so it is always the later one that fails. x's come from inside
+    the .pra, and are taken when written. An input that is not there takes
+    nothing: it fails on its own, and must not take a later one down. }
+  if command = cmCompress then
+    for i := 0 to High(jobs) do if FileExists(jobs[i].name) then begin
+      CurJob := @jobs[i];
+      path := OutputPath(jobs[i].name, ChangeFileExt(ExtractFileName(jobs[i].name), '.pra'));
+      Claim(path);
+    end;
+  { the threads go to files first (an image of 1 MiB is one band), and what
+    is left to each file's bands }
   workers := threads;
   if workers > inputs.Count then workers := inputs.Count;
   bandThreads := threads div workers;
   nextJob := 0; nextPrint := 0;
+  ScheduleJobs(workers);
   InitCriticalSection(printLock);
+  InitCriticalSection(tokLock);
+  tokWake := RTLEventCreate;
+  tokFree := threads;
+  { the writes beside the work: when each is flushed, and --stats does not
+    time them }
+  if (command in [cmCompress, cmExtract]) and SyncToDisk and not dryRun and not stats and
+     (GetEnvironmentVariable('PRA_SYNC_INLINE') = '') then StartCommitter;
   pool := nil;
   SetLength(pool, workers - 1);
-  for i := 0 to High(pool) do pool[i] := TWorker.Create(False);
+  { a thread the system refuses (a host at its limit) leaves the files to
+    the ones it gave and to this one: the same outputs, only slower }
+  n := 0;
+  while n < Length(pool) do begin
+    try
+      pool[n] := TWorker.Create(False);
+    except
+      on EThread do Break;
+    end;
+    Inc(n);
+  end;
+  SetLength(pool, n);
   Work;
-  for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+  for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
+  StopCommitter;
   DoneCriticalSection(printLock);
+  DoneCriticalSection(claimLock);
+  if (stats or jsonOut) and (outputError = '') then Summary(Seconds - started);
+  if outputError <> '' then begin
+    Writeln(StdErr, 'pra: could not write the output: ', outputError);
+    if bugs > 0 then begin BugNote(bugFile); Halt(3); end;
+    Halt(1);
+  end;
   if errors > 0 then begin
     if inputs.Count > 1 then Writeln(StdErr, 'pra: ', errors, ' of ', inputs.Count, ' files failed');
+    if bugs > 0 then begin BugNote(bugFile); Halt(3); end;
     Halt(1);
+  end;
+  Finish(0);
+  except
+    { anything not caught where a file is worked on: a bug }
+    on e: Exception do begin
+      { a write or a read the system refused (a full disk): not a bug }
+      if NotABug(e) then begin
+        if e is EInOutError then OutputFailed(e.Message) else Writeln(StdErr, 'pra: ', e.Message);
+        Halt(1);
+      end;
+      Writeln(StdErr, 'pra: internal error: ', e.ClassName, ': ', e.Message);
+      if inputs <> nil then begin
+        if inputs.Count > 0 then BugNote(inputs[0]) else BugNote('');
+      end else BugNote('');
+      Halt(3);
+    end;
   end;
 end.

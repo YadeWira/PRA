@@ -14,6 +14,9 @@ OUT=${PRA_OUT:-build/ci}
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=.exe ;; *) EXE= ;; esac
 if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 256"; fi
 rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/t" "$OUT/p" "$OUT/x"
+# the commit `pra --version` and `report` show (release.yml sets it from the tag)
+PRA_COMMIT=${PRA_COMMIT:-$(git rev-parse --short=7 HEAD 2>/dev/null || true)}
+export PRA_COMMIT
 
 echo "== layer tests"
 for prog in test_blake3 test_arith test_model test_pnm test_parsers test_codec test_format; do
@@ -32,6 +35,7 @@ echo "== the command"
 $FPC -O3 -dPRA_FAST -Fupas -Fipas -FU"$OUT/u" -o"$OUT/pra$EXE" pas/pracli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/pra$EXE" --version
+"$OUT/pra$EXE" selftest
 "$OUT/pra$EXE" a -q --output-dir="$OUT/p" tests/pnm/* tests/bmp/* tests/hdr/* tests/other/* tests/multi/* tests/sci/* tests/cont/*
 "$OUT/pra$EXE" x -q --output-dir="$OUT/x" "$OUT"/p/*.pra
 n=0

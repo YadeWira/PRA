@@ -39,8 +39,11 @@ rm -rf "$OUT/tmp_fs"; mkdir -p "$OUT/tmp_fs"; "$OUT/test_prafs" "$(realpath "$OU
 
 echo "== the command"
 mkdir -p "$OUT/cli"
+export PRA_COMMIT=${PRA_COMMIT:-$(git describe --always --dirty --abbrev=7 2>/dev/null || true)}
 $FPC -O3 -dPRA_FAST -Fupas -Fipas -FU"$OUT/cli" -o"$OUT/pra" pas/pracli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
+# the samples pra selftest carries, and the .pra of each: current
+python3 tools/gen_selftest.py --check "$OUT/pra"
 pas/tests/cli.sh "$OUT/pra" "$OUT/tmp_cli" tests/pnm tests/bmp tests/hdr tests/other tests/multi tests/sci tests/cont | tail -1
 
 echo "== the fast build makes the same streams"

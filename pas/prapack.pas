@@ -16,7 +16,7 @@ unit prapack;
 
 interface
 
-uses SysUtils, prablake3, praformat, pracodec;
+uses SysUtils, prablake3, praformat, pracodec, prastage;
 
 type
   TPackError = (
@@ -46,9 +46,12 @@ type
     function Text: string;
   end;
 
-{ The original file -> .pra. ext: the original's extension without the dot,
+{ The original file -> .pra. verify: decode the stream and compare it with
+  the original before it is kept (pracodec.VerifyStreams: the same for
+  every file of a run). ext: the original's extension without the dot,
   kept for the extracted name when the format allows it. }
-function Pack(const original: TBytes; out pra: TBytes; const ext: string = ''; threads: Integer = 1): TPackResult;
+function Pack(const original: TBytes; out pra: TBytes; threads: Integer = 1; verify: Boolean = True;
+              const ext: string = ''): TPackResult;
 
 { .pra -> the original. maxOutput: the largest original accepted. With
   ukHashMismatch, `original` holds what was decoded and `expected` the hash
@@ -80,21 +83,29 @@ begin
   Result.err := e;
 end;
 
-function Pack(const original: TBytes; out pra: TBytes; const ext: string; threads: Integer): TPackResult;
-var stream: TBytes; e, why: string;
+function Pack(const original: TBytes; out pra: TBytes; threads: Integer; verify: Boolean;
+              const ext: string): TPackResult;
+var stream: TBytes; e, why: string; h: THash16;
 begin
+  VerifyStreams := verify;
   e := ext;
   if not ValidExtension(e) then e := '';
   pra := nil;
   Result := PackFail(ukOk);
+  { the check runs beside the coding (pracodec): its time is encode's }
+  StageEnter(stEncode);
   if not EncodeFile(original, stream, why, threads) then begin
+    StageEnter(stNone);
     Result.err := ukNotRaster; Result.why := why; Exit;
   end;
+  StageEnter(stHash);
+  h := Blake3_128(original);
+  StageEnter(stNone);
   Result.stored := Length(stream) >= Length(original);
   if Result.stored then
-    Result.fmt := WritePra(original, Blake3_128(original), Length(original), pra, True, e)
+    Result.fmt := WritePra(original, h, Length(original), pra, True, e)
   else
-    Result.fmt := WritePra(stream, Blake3_128(original), Length(original), pra, False, e);
+    Result.fmt := WritePra(stream, h, Length(original), pra, False, e);
   if not Result.fmt.Ok then begin pra := nil; Result.err := ukFormat; end;
 end;
 
@@ -111,11 +122,15 @@ begin
   if p.orig_size > maxOutput then Exit(PackFail(ukTooLarge));
   if p.stored then original := p.payload
   else begin
+    StageEnter(stDecode);
     Result.dec := DecodeFile(p.payload, Int64(p.orig_size), original, threads);
+    StageEnter(stNone);
     if Result.dec <> dsOk then begin original := nil; Result.err := ukCodec; Exit; end;
   end;
   if QWord(Length(original)) <> p.orig_size then begin original := nil; Exit(PackFail(ukSizeMismatch)); end;
+  StageEnter(stHash);
   actual := Blake3_128(original);
+  StageEnter(stNone);
   if not CompareMem(@actual[0], @expected[0], SizeOf(THash16)) then Result.err := ukHashMismatch;
 end;
 

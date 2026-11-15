@@ -1,0 +1,55 @@
+name: Bug report
+description: Something PRA did wrong, refused, or crashed on
+title: "pra: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The quickest way to a fix is the output of
+        `pra report FILE` (on the file it happened with): it has PRA's build, the
+        system and the file's structure, and **not** the image, its header
+        contents or folder names. `pra report` prints a link that opens this form
+        with the report filled in below.
+  - type: textarea
+    id: body
+    attributes:
+      label: The output of pra report
+      description: Run `pra report FILE` (or `pra report` without a file) and paste all of it.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you ran
+      description: The exact command line(s), and what it printed.
+      placeholder: |
+        pra a scan.tif
+        pra: scan.tif: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: The file (if you can share it)
+      description: |
+        `pra report --with-file FILE` puts a copy beside the report. GitHub takes a .png,
+        .jpg or .gif as it is; zip anything else (.ppm, .tif, .pra...) first. Only attach
+        what you are free to share.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: "`pra selftest` passes on this machine (if it fails, say so above)"
+          required: false

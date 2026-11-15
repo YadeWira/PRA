@@ -55,6 +55,13 @@ var
     there are: the decoder never looks at this. The tests lower it, to code
     small images in many bands. }
   BandBytes: Int64 = 1 shl 20;
+  { False (pra a --no-verify): the encoder does not decode its own stream
+    to check it. A side coding's rebuild (RLE, PackBits...) and the
+    stream's header are still checked; the pixels' model, and a file of
+    parts' frame, are not, and a bug there would only show when extracting,
+    where the hash catches it. The stream is the same either way. Set once,
+    before any work. }
+  VerifyStreams: Boolean = True;
 
 type
   TDecodeStatus = (dsOk, dsEmpty, dsFutureVersion, dsBadStream, dsTooBig);
@@ -76,6 +83,25 @@ function EncodeFile(const d: TBytes; out s: TBytes; out why: string; threads: In
   the stream is the same whatever it is. }
 function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer = 1): TDecodeStatus;
 function DecodeStatusName(st: TDecodeStatus): string;
+
+type
+  { a stream's part, as info and --stats tell it (DescribeStream): what it
+    is (0 bytes, 1 an image, 2 a copy of earlier bytes, 3 an image coded
+    against references), its bytes in the file, its stream's; an image's
+    layout and bands }
+  TStreamPart = record
+    kind: Integer;
+    len, streamLen: Int64;
+    L: TRasterLayout;
+    mode, bands: Integer;
+  end;
+  TStreamParts = array of TStreamPart;
+
+{ What a stream holds, from its headers alone (no pixel decoded): its
+  version (IMAGE_STREAM or PARTS_STREAM) and its parts (one for an image). }
+function DescribeStream(const s: TBytes; maxOut: Int64; out streamVersion: Integer; out parts: TStreamParts): TDecodeStatus;
+{ the bands of every image in it; 0 if it does not read }
+function StreamBands(const s: TBytes; maxOut: Int64): Integer;
 
 { for the tests and tools: the parser that took the file }
 function ParseAny(const d: TBytes; out L: TRasterLayout): TParseStatus;
@@ -1526,14 +1552,14 @@ type
   PEncodeBands = ^TEncodeBands;
 
 procedure EncodeBandJob(ctx: Pointer; k: Integer);
-var e: PEncodeBands; Lb: TRasterLayout; live: TLiveStream; v: TVerifier; tid: TThreadID; ok: Boolean;
+var e: PEncodeBands; Lb: TRasterLayout; live: TLiveStream; v: TVerifier; tid: TThreadID = 0; ok: Boolean;
 begin
   e := ctx;
   e^.failed[k] := True;
   Lb := BandLayout(e^.Lp, e^.n, k);
   live := TLiveStream.Create;
   v.live := live; v.L := Lb; v.mode := e^.mode; v.back := e^.back; v.failed := True; v.ref := e^.ref;
-  tid := BeginThread(@VerifierRun, @v);
+  if VerifyStreams then tid := BeginThread(@VerifierRun, @v) else v.failed := False;
   ok := True;
   try
     { on an exception EncodePixelsLive finishes the stream: the verifier ends }
@@ -1541,8 +1567,10 @@ begin
   except
     ok := False;
   end;
-  WaitForThreadTerminate(tid, 0);
-  CloseThread(tid);
+  if VerifyStreams then begin
+    WaitForThreadTerminate(tid, 0);
+    CloseThread(tid);
+  end;
   live.Free;
   e^.failed[k] := not ok or v.failed;
 end;
@@ -1651,7 +1679,9 @@ begin
   o.PutVarint(eb.n);
   { the pixels, and their check beside them: each band decoded by a second
     thread as its bytes come out, into one buffer (the bands are rows apart) }
-  eb.back := nil; SetLength(eb.back, Length(px));
+  { (without the check, the pixels themselves: nothing writes them) }
+  if VerifyStreams then begin eb.back := nil; SetLength(eb.back, Length(px)); end
+  else eb.back := px;
   eb.outs := nil; SetLength(eb.outs, eb.n);
   eb.failed := nil; SetLength(eb.failed, eb.n);
   RunJobs(eb.n, threads, @EncodeBandJob, @eb);
@@ -1862,6 +1892,78 @@ begin
   Result := dsOk;
 end;
 
+function DescribeStream(const s: TBytes; maxOut: Int64; out streamVersion: Integer; out parts: TStreamParts): TDecodeStatus;
+var src: TSource; n, k: SizeInt; len, slen, total, from, coded: Int64; kind, m: Integer; refs: TPartRefs;
+  hd: TStreamHead;
+
+  function Image(first, l: Int64): TDecodeStatus;
+  var p: TStreamPart;
+  begin
+    Result := ReadStream(Copy(s, first, l), maxOut, hd);
+    if Result <> dsOk then Exit;
+    p.L := hd.L; p.mode := hd.mode; p.bands := hd.bands; p.streamLen := l;
+    p.kind := PART_IMAGE; p.len := hd.L.dataOffset + hd.L.dataLength + hd.tailLen;
+    SetLength(parts, Length(parts) + 1);
+    parts[High(parts)] := p;
+  end;
+
+begin
+  parts := nil; streamVersion := 0;
+  if Length(s) = 0 then Exit(dsEmpty);
+  streamVersion := s[0];
+  if s[0] <> PARTS_STREAM then Exit(Image(0, Length(s)));
+  src.b := s; src.p := 1; src.ok := True;
+  n := src.GetVarint(Length(s));
+  if not src.ok or (n < 1) then Exit(dsBadStream);
+  total := 0;
+  for k := 1 to n do begin
+    kind := src.Get;
+    len := src.GetVarint(High(Int64) shr 1);
+    if not src.ok or (kind > PART_REF) then Exit(dsBadStream);
+    if len > maxOut - total then Exit(dsTooBig);
+    if kind in [PART_COPY, PART_BYTES] then begin
+      SetLength(parts, Length(parts) + 1);
+      parts[High(parts)] := Default(TStreamPart);
+      parts[High(parts)].kind := kind; parts[High(parts)].len := len;
+      parts[High(parts)].L.Clear;
+      if kind = PART_COPY then begin
+        from := src.GetVarint(total);
+        if not src.ok or (len < 1) or (len > total - from) then Exit(dsBadStream);
+      end else if len > 0 then begin
+        { a section, skipped: stored, or coded (its length first) }
+        m := src.Get;
+        if not src.ok then Exit(dsBadStream);
+        if m = SECTION_STORED then coded := len
+        else if m = SECTION_CODED then coded := src.GetVarint(Length(s) - src.p)
+        else Exit(dsBadStream);
+        if not src.ok or (coded > Length(s) - src.p) then Exit(dsBadStream);
+        parts[High(parts)].streamLen := coded;
+        Inc(src.p, coded);
+      end;
+    end else begin
+      if (kind = PART_REF) and not GetRefs(src, total, refs) then Exit(dsBadStream);
+      slen := src.GetVarint(Length(s) - src.p);
+      if not src.ok or (slen < 1) or (s[src.p] = PARTS_STREAM) then Exit(dsBadStream);
+      Result := Image(src.p, slen);
+      if Result <> dsOk then Exit;
+      parts[High(parts)].kind := kind;
+      if parts[High(parts)].len <> len then Exit(dsBadStream);
+      Inc(src.p, slen);
+    end;
+    Inc(total, len);
+  end;
+  if src.p <> Length(s) then Exit(dsBadStream);
+  Result := dsOk;
+end;
+
+function StreamBands(const s: TBytes; maxOut: Int64): Integer;
+var v, k: Integer; parts: TStreamParts;
+begin
+  Result := 0;
+  if DescribeStream(s, maxOut, v, parts) <> dsOk then Exit;
+  for k := 0 to High(parts) do Inc(Result, parts[k].bands);
+end;
+
 function EncodeParts(const d: TBytes; const parts: TParts; out s: TBytes; out why: string; threads: Integer): Boolean;
 var
   o: TSink; k, j, n, images, m: Integer; img, back: TBytes; w: string;
@@ -1938,6 +2040,7 @@ begin
   s := o.Done;
   { each image came back already, each section too: what is left to check
     is the parts' frame }
+  if not VerifyStreams then Exit(True);
   Result := (DecodeParts(s, Length(d), back, threads, @d) = dsOk) and (Length(back) = Length(d))
     and ((Length(d) = 0) or CompareMem(@back[0], @d[0], Length(d)));
   if not Result then begin s := nil; why := 'did not come back the same'; end;

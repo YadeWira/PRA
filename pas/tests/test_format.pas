@@ -119,7 +119,7 @@ begin
   CheckR(Open(Filled(200, 0), p), 'NotPra', 'zeros');
 
   Writeln('--- the extension');
-  pr := Pack(orig, b, 'PPMx');
+  pr := Pack(orig, b, 1, True, 'PPMx');
   r := Open(b, p);
   Check(pr.Ok and r.Ok and (p.ext = 'PPMx') and (Length(b) = WrittenLength(Length(p.payload), 4)),
      'Pack keeps it as it is written: .PPMx');
@@ -132,10 +132,10 @@ begin
   CheckR(Open(WithByte(b, HEADER_SIZE + DESCRIPTOR_SIZE, MAX_EXT + 1), p), 'BadExtension', '  a length above MAX_EXT');
   CheckR(Open(Copy(b, 0, HEADER_SIZE + DESCRIPTOR_SIZE), p), 'ShortFile', '  no extension field at all');
   CheckR(Open(Copy(b, 0, HEADER_SIZE + DESCRIPTOR_SIZE + 1 + 4 + EXT_CHECK - 1), p), 'ShortFile', '  its check cut short');
-  pr := Pack(orig, b, '../x');
+  pr := Pack(orig, b, 1, True, '../x');
   r := Open(b, p);
   Check(pr.Ok and r.Ok and (p.ext = ''), 'Pack leaves out an extension the format does not keep (../x)');
-  pr := Pack(orig, b, 'abcdefghijklmnop');
+  pr := Pack(orig, b, 1, True, 'abcdefghijklmnop');
   r := Open(b, p);
   Check(pr.Ok and r.Ok and (p.ext = ''), '  and one of 16 characters');
   other := Filled(100, $AB);
