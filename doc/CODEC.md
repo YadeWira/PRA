@@ -111,7 +111,7 @@ length against the caps before decoding it.
 **Bands.** The rows (of the pixels, or of an HDR file's RGBE) are cut into
 bands of about the same number of rows, each coded with fresh models and its
 own arithmetic coder, never looking at the band above: so they are coded and
-decoded at once, one a thread. The encoder makes each at least 2 MiB of
+decoded at once, one a thread. The encoder makes each at least 1 MiB of
 pixels, at most 256; the decoder reads how many from the stream, so the
 stream is the same whatever the threads. Each band is decoded from its own
 copy of its bytes: what the arithmetic decoder reads past a band's end is
@@ -343,11 +343,11 @@ give (`bench_codec`, compress and verify, 8 threads):
 |---|---|---|---|
 | one band | 6,965,359 | 9,928 ms | 15,145 ms |
 | 4 MiB | 6,965,359 | | |
-| **2 MiB** | 6,967,960 (+0.04%) | 4,393 ms | 6,155 ms |
-| 1 MiB | 6,977,388 (+0.17%) | 2,395 ms | 4,917 ms |
+| 2 MiB | 6,967,960 (+0.04%) | 4,393 ms | 6,155 ms |
+| **1 MiB** | 6,977,388 (+0.17%) | 2,395 ms | 4,917 ms |
 | 512 KiB | 6,992,865 (+0.40%) | | |
 
-2 MiB kept. The `pra` command, its default threads (the processors, up to
+2 MiB kept then; 1 MiB since 15/11/2026 (below). The `pra` command, its default threads (the processors, up to
 8), each file decompressed and compared:
 
 | file | size | `pra a` | `pra x` |
@@ -403,6 +403,25 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 15/11/2026: bands of 1 MiB
+
+A profile (callgrind) of the model on a photo: `TPixelCoder.Code` takes
+about 40% of the instructions, the two mixers (mixing and training) 29%;
+a counter table that fits in the cache is only 6% faster, and a counter
+update without a jump changed nothing. The model is bound by its
+arithmetic; what limits the time is how few bands there are: with 2 MiB a
+7.4 MB photo is 3 bands, and 4 or 16 threads take the same time. With
+16 threads:
+
+| band size | sample_1920x1280.ppm (7.4 MB) | example.ppm (10.8 MB) |
+|---|---|---|
+| 2 MiB | 5.7 s, 2,714,251 | 6.7 s, 1,146,196 |
+| **1 MiB** | 3.0 s, 2,720,154 (+0.22%) | 4.6 s, 1,147,221 (+0.09%) |
+| 512 KiB | 2.0 s, 2,728,647 (+0.53%) | 3.3 s, 1,149,971 (+0.33%) |
+
+1 MiB kept. The stream records its bands, so streams made before still
+decode.
 
 ### 01/11/2026: IFF RGBN and RGB8
 

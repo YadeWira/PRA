@@ -212,7 +212,7 @@ begin
     end;
   end;
   Check((bad = 0) and (raised = 0), Format('1000 damaged streams in bands: no exception (%d), nothing over the cap (%d)', [raised, bad]));
-  BandBytes := 1 shl 21;
+  BandBytes := 1 shl 20;
 
   Writeln('refused');
   Check(not EncodeFile(Bytes('P2 2 1 255'#10'7 300'#10), s, why) and (why = 'unsupported variant'),

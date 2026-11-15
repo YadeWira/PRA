@@ -5,3 +5,5 @@ hash.txt
 *.o
 *.ppu
 __pycache__/
+credenciales.md
+handoff.md

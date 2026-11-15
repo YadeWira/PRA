@@ -49,11 +49,12 @@ const
 var
   { A band is coded on its own, with fresh models, so bands are coded and
     decoded at once on as many threads. The encoder makes each at least
-    this many bytes of pixels: 2 MiB loses 0.04% against one band on the
-    tuning set, 1 MiB 0.17% (doc/CODEC.md). The stream records how many
+    this many bytes of pixels: 1 MiB loses 0.17% against one band on the
+    tuning set, 2 MiB 0.04%, but takes twice the threads (doc/CODEC.md).
+    The stream records how many
     there are: the decoder never looks at this. The tests lower it, to code
     small images in many bands. }
-  BandBytes: Int64 = 1 shl 21;
+  BandBytes: Int64 = 1 shl 20;
 
 type
   TDecodeStatus = (dsOk, dsEmpty, dsFutureVersion, dsBadStream, dsTooBig);
