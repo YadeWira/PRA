@@ -108,6 +108,12 @@ jobs:
         with:
           name: hash-windows-x64
           path: hash.txt
+      # the command as CI built it, to try in the Windows VMs before a release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pra-windows-x64
+          path: build/ci/pra.exe
+          retention-days: 14
 
   windows-x86:
     runs-on: windows-latest
@@ -131,6 +137,12 @@ jobs:
         with:
           name: hash-windows-x86
           path: hash.txt
+      # the command as CI built it, to try in the Windows VMs before a release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pra-windows-x86
+          path: build/ci/pra.exe
+          retention-days: 14
 
   determinism:
     needs: [linux-x64, linux-arm64, linux-x86, macos-arm64, windows-x64, windows-x86]

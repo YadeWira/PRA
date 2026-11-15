@@ -142,8 +142,8 @@ alone. Exit 0 only if every check passed. CI runs it on every platform.
 ### `pra --version`
 
 ```
-pra 0.1.0
-commit: 1b32835
+pra 0.2.0
+commit: ad0dd25
 built: 2026/11/15
 fpc: 3.2.2
 target: x86_64-linux

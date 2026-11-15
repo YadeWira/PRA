@@ -44,7 +44,7 @@ const
   PARTS_STREAM = 3;
   OLD_IMAGE_STREAM = 2;
   STREAM_VERSION = IMAGE_STREAM;
-  PRA_VERSION = '0.1.0';
+  PRA_VERSION = '0.2.0';
 
 var
   { A band is coded on its own, with fresh models, so bands are coded and
