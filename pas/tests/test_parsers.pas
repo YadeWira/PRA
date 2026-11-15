@@ -133,6 +133,12 @@ begin
   Check((st = psOk) and (L.channels = 4) and (L.dataOffset = 66), 'bgra32.bmp: bitfields, four channels after the masks');
   d := ReadAll(dirB + '/rgb565.bmp'); st := ParseBmp(d, L);
   Check((st = psOk) and (L.bits = 16) and not L.bigEndian and (L.rowBytes = 44), 'rgb565.bmp: one 16-bit little-endian sample');
+  d := ReadAll(dirB + '/bare.dib'); st := ParseBmp(d, L);
+  Check((st = psOk) and (L.dataOffset = 40 + 1024) and (L.width = 29), 'bare.dib: no file header, the pixels after the palette');
+  d := ReadAll(dirB + '/macbinary.bmp'); st := ParseBmp(d, L);
+  Check((st = psOk) and (L.dataOffset = 128 + 14 + 40 + 1024), 'macbinary.bmp: after MacBinary''s 128 bytes');
+  d := ReadAll(dirB + '/cut_short.bmp'); st := ParseBmp(d, L);
+  Check((st = psOk) and (L.height = 13) and (L.dataOffset + L.dataLength < Length(d)), 'cut_short.bmp: 13 whole rows of 15');
 
   Writeln('BMP: hostile headers');
   d := ReadAll(dirB + '/graypal8.bmp');
@@ -142,7 +148,9 @@ begin
   ExpectBmp(WithU32(d, 14, 41), psMalformed, 'a DIB header of 41 bytes');
   ExpectBmp(WithU32(d, 10, Length(d) + 1), psMalformed, 'the pixels after the end of the file');
   ExpectBmp(WithU32(d, 10, 20), psMalformed, 'the pixels inside the headers');
-  ExpectBmp(Copy(d, 0, Length(d) - 1), psTruncated, 'one byte short');
+  st := ParseBmp(Copy(d, 0, Length(d) - 1), L);
+  Check((st = psOk) and (L.dataOffset + L.dataLength < Length(d) - 1) and (L.dataLength mod L.rowBytes = 0),
+    'one byte short: the whole rows the image, the rest its tail');
   ExpectBmp(WithU32(d, 30, 2), psMalformed, 'RLE4 at 8 bits');
   ExpectBmp(WithU32(d, 30, 4), psUnsupported, 'a JPEG inside');
   ExpectBmp(WithU32(d, 30, 5), psUnsupported, 'a PNG inside');
@@ -451,8 +459,8 @@ begin
   d := ReadAll(dirS + '/dpx_8bit_padded.dpx'); st := ParseAny(d, L);
   Check((st = psOk) and (L.coding = CODING_RAW) and (L.rowBytes = 40) and (HeaderStride(rfDPX, d, 0, 2048) = 40),
     'dpx_8bit_padded.dpx: rows of 37 bytes in 40');
-  dd := Copy(d, 0, Length(d)); dd[770 + 1] := 2;
-  Check(ParseDpx(dd, L) = psUnsupported, 'DPX of two image elements: unsupported');
+  dd := Copy(d, 0, Length(d)); dd[770] := 1; dd[770 + 1] := 0;
+  Check(ParseDpx(dd, L) = psUnsupported, 'DPX of 256 image elements: unsupported');
   dd := Copy(d, 0, Length(d)); dd[800] := 99;
   Check(ParseDpx(dd, L) = psUnsupported, 'DPX, a descriptor of 99: unsupported');
   Check(ParseDpx(Copy(d, 0, 900), L) = psTruncated, 'DPX cut after its header: truncated');
@@ -467,12 +475,25 @@ begin
   d := ReadAll(dirS + '/fits_float.fits'); st := ParseAny(d, L);
   Check((st = psOk) and L.isFloat and L.bigEndian and (L.dataOffset + L.dataLength < Length(d)),
     'fits_float.fits: 32-bit floats, padded to 2880');
+  d := ReadAll(dirS + '/fits_int32.fits'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 32) and not L.isFloat and (L.width = 17), 'fits_int32.fits: BITPIX 32, integers');
+  d := ReadAll(dirS + '/fits_int64.fits'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 64) and not L.isFloat and (L.dataLength = 13 * 9 * 8), 'fits_int64.fits: BITPIX 64');
+  d := ReadAll(dirS + '/fits_double.fits'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.bits = 64) and L.isFloat, 'fits_double.fits: BITPIX -64, doubles');
+  d := ReadAll(dirS + '/fits_extensions.fits'); st := ParseAny(d, L);
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (fmt = rfFITS) and (Length(parts) = 4)
+    and (parts[1].kind = pkImage) and (parts[3].kind = pkImage) and (parts[3].L.bits = 32),
+    'fits_extensions.fits: an empty primary HDU, two IMAGE extensions, a table as bytes');
+  d := ReadAll(dirS + '/dpx_two_elements.dpx'); st := ParseAny(d, L);
+  Check((st = psOk) and (L.channels = 3) and (L.dataOffset + L.dataLength < Length(d)),
+    'dpx_two_elements.dpx: the first element the image, the second its tail');
   d := ReadAll(dirS + '/fits_16.fits');
   Check(ParseFits(Copy(d, 0, 2000), L) = psMalformed, 'FITS cut inside its first block: malformed');
   dd := Copy(d, 0, Length(d)); for i := 80 * 6 to 80 * 7 - 1 do dd[i] := 32;
   Check(ParseFits(dd, L) = psTruncated, 'FITS without END: truncated');
-  dd := Copy(d, 0, Length(d)); dd[80 + 29] := Ord('4'); dd[80 + 28] := Ord('6');
-  Check(ParseFits(dd, L) = psUnsupported, 'FITS of 64-bit integers: unsupported');
+  dd := Copy(d, 0, Length(d)); dd[80 + 29] := Ord('4'); dd[80 + 28] := Ord('2');
+  Check(ParseFits(dd, L) = psUnsupported, 'FITS of 24-bit integers (no such BITPIX): unsupported');
   d := ReadAll(dirS + '/vicar_byte.img'); st := ParseAny(d, L);
   Check((st = psOk) and (L.format = rfVICAR) and (L.rowBytes = 34) and (L.dataOffset mod 34 = 0),
     'vicar_byte.img: records of 34 bytes, a binary header line');
@@ -556,6 +577,9 @@ begin
   Check(Split(d, parts, fmt) and Covers(d, parts) and (parts[High(parts)].L.channels = 1)
     and (parts[High(parts)].len = parts[High(parts) - 2].len),
     'psd_dup.psd: a layer that is the composite: its planes apart, to be copies');
+  d := ReadAll(dirC + '/tiff_macbinary.tif'); st := ParseAny(d, L);
+  Check(Split(d, parts, fmt) and Covers(d, parts) and (fmt = rfTIFF) and (parts[0].kind = pkBytes) and (parts[0].len >= 128)
+    and (parts[1].kind = pkImage), 'tiff_macbinary.tif: a TIFF after MacBinary''s 128 bytes');
   d := ReadAll(dirC + '/ilbm_5planes.iff'); st := ParseAny(d, L);
   Check((st = psOk) and (L.format = rfIFF) and (L.coding = CODING_ILBM) and (L.width = 48) and (L.channels = 1),
     'ilbm_5planes.iff: five planes, ByteRun1, rows of 48 pixels');
@@ -632,8 +656,8 @@ begin
   Writeln('the layout''s own limits');
   L.Clear; L.width := 9; L.height := 13; L.channels := 1; L.bits := 0;
   Check(SizeRows(L, 1000) = psMalformed, '0 bits a sample: malformed, no division by zero');
-  L.bits := 33;
-  Check(SizeRows(L, 1000) = psMalformed, '33 bits a sample: malformed');
+  L.bits := 65;
+  Check(SizeRows(L, 1000) = psMalformed, '65 bits a sample: malformed');
 
   Writeln('fuzzing');
   samples := nil;
@@ -676,5 +700,5 @@ begin
   Check(bad = 0, Format('20000 mutated headers of 13 formats: no exception, pixels inside (%d ok)', [oks]));
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 208) then Halt(1);
+  if (failures > 0) or (cells < 217) then Halt(1);
 end.

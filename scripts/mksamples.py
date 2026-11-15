@@ -102,6 +102,21 @@ bmp('bgra32.bmp', 24, 16, 32, lambda y: b''.join(bytes([smooth(x, y, 2, 255), sm
     comp=3, masks=struct.pack('<III', 0xFF0000, 0xFF00, 0xFF))
 bmp('rgb565.bmp', 21, 14, 16, lambda y: b''.join(struct.pack('<H', ((smooth(x, y, 0, 31)) << 11) | (smooth(x, y, 1, 63) << 5) | smooth(x, y, 2, 31)) for x in range(21)),
     comp=3, masks=struct.pack('<III', 0xF800, 0x7E0, 0x1F))
+# without its file header (a .dib), after MacBinary's 128 bytes, and cut
+# short in its last rows
+def bmp_bytes(*a, **k):
+    global write
+    keep = write; got = {}
+    write = lambda n, d: got.__setitem__('d', d)
+    bmp('x', *a, **k)
+    write = keep
+    return got['d']
+b = bmp_bytes(29, 15, 8, lambda y: bytes(smooth(x, y, 1, 255) for x in range(29)), gray_pal)
+write('bare.dib', b[14:])
+mac = bytearray(128); mac[1] = 7; mac[2:9] = b'MAC.BMP'; mac[65:69] = b'BMP '; mac[69:73] = b'ogle'
+struct.pack_into('>I', mac, 83, len(b))
+write('macbinary.bmp', bytes(mac) + b + bytes((-len(b)) % 128))
+write('cut_short.bmp', b[:len(b) - 50])
 
 # ---------- Radiance HDR ----------
 out = os.path.join(root, 'hdr'); os.makedirs(out, exist_ok=True)
@@ -578,6 +593,19 @@ w, h = 37, 15
 dpx('dpx_8bit_padded.dpx', True, w, h, 6, 8, 1, b''.join(bytes(smooth(x, y, 0, 255) for x in range(w)) + bytes(3) for y in range(h)))
 w, h = 21, 11
 dpx('dpx_16bit_le.dpx', False, w, h, 50, 16, 1, b''.join(b''.join(struct.pack('<H', smooth(x, y, c, 65535)) for x in range(w) for c in range(3)) + bytes(2) for y in range(h)))
+# DPX of two image elements: the first is the image, the second its tail
+w, h = 19, 9
+d1 = b''.join(bytes(smooth(x, y, c, 255) for x in range(w) for c in range(3)) + bytes((-w * 3) % 4) for y in range(h))
+d2 = b''.join(bytes(smooth(x, y, 3, 255) for x in range(w)) + bytes((-w) % 4) for y in range(h))
+head = bytearray(2048)
+head[0:4] = b'SDPX'; struct.pack_into('>I', head, 4, 2048); head[8:12] = b'V2.0'
+struct.pack_into('>I', head, 16, 2048 + len(d1) + len(d2))
+struct.pack_into('>HHII', head, 768, 0, 2, w, h)
+head[800] = 50; head[801] = 2; head[802] = 2; head[803] = 8
+struct.pack_into('>HHIII', head, 804, 1, 0, 2048, 0, 0)
+head[872] = 4; head[873] = 2; head[874] = 2; head[875] = 8
+struct.pack_into('>HHIII', head, 876, 1, 0, 2048 + len(d1), 0, 0)
+write('dpx_two_elements.dpx', bytes(head) + d1 + d2)
 
 # Cineon: 10 bits three to a word, big-endian; 8 bits
 def cineon(name, w, h, bits, data):
@@ -610,6 +638,32 @@ fits('fits_rgb.fits', [card('SIMPLE', 'T'), card('BITPIX', 8), card('NAXIS', 3),
 w, h = 19, 12
 fits('fits_float.fits', [card('SIMPLE', 'T'), card('BITPIX', -32), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h)],
      b''.join(struct.pack('>f', smooth(x, y, 0, 1000) / 7.0) for y in range(h) for x in range(w)))
+# FITS: 32 and 64-bit integers (negative ones too), doubles; extensions:
+# an empty primary HDU, two IMAGE extensions and a binary table
+w, h = 17, 11
+fits('fits_int32.fits', [card('SIMPLE', 'T'), card('BITPIX', 32), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h)],
+     b''.join(struct.pack('>i', smooth(x, y, 0, 400000) - 200000) for y in range(h) for x in range(w)))
+w, h = 13, 9
+fits('fits_int64.fits', [card('SIMPLE', 'T'), card('BITPIX', 64), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h)],
+     b''.join(struct.pack('>q', (smooth(x, y, 0, 60000) - 30000) * 100003) for y in range(h) for x in range(w)))
+w, h = 15, 10
+fits('fits_double.fits', [card('SIMPLE', 'T'), card('BITPIX', -64), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h)],
+     b''.join(struct.pack('>d', (smooth(x, y, 0, 1000) - 500) / 3.0) for y in range(h) for x in range(w)))
+def fits_hdu(cards, data):
+    head = b''.join(c.ljust(80).encode() for c in cards + ['END'])
+    head += b' ' * ((-len(head)) % 2880)
+    return head + data + bytes((-len(data)) % 2880)
+ext = fits_hdu([card('SIMPLE', 'T'), card('BITPIX', 16), card('NAXIS', 0), card('EXTEND', 'T')], b'')
+w, h = 21, 14
+ext += fits_hdu([card('XTENSION', "'IMAGE   '"), card('BITPIX', 16), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h),
+                 card('PCOUNT', 0), card('GCOUNT', 1)], b''.join(struct.pack('>h', smooth(x, y, 0, 30000)) for y in range(h) for x in range(w)))
+ext += fits_hdu([card('XTENSION', "'BINTABLE'"), card('BITPIX', 8), card('NAXIS', 2), card('NAXIS1', 8), card('NAXIS2', 5),
+                 card('PCOUNT', 0), card('GCOUNT', 1), card('TFIELDS', 1), card('TFORM1', "'1D      '")],
+                b''.join(struct.pack('>d', k * 1.5) for k in range(5)))
+w, h = 12, 8
+ext += fits_hdu([card('XTENSION', "'IMAGE   '"), card('BITPIX', -32), card('NAXIS', 2), card('NAXIS1', w), card('NAXIS2', h),
+                 card('PCOUNT', 0), card('GCOUNT', 1)], b''.join(struct.pack('>f', smooth(x, y, 1, 100) / 9.0) for y in range(h) for x in range(w)))
+write('fits_extensions.fits', ext)
 
 # VICAR: bytes in records longer than a row, a binary header line; HALF
 # bands one after the other
@@ -736,6 +790,11 @@ def tiff_strips(w, h, rps, rowfn, spp, bps, comp=1, planar=1, gap=0, be=False):
 w, h = 37, 23
 rr = rgb_rows(w, h)
 tiff('tiff_rgb_strips.tif', False, tiff_strips(w, h, 5, lambda y, p: rr[y], 3, 8))
+# the same, as an old Macintosh kept it: after MacBinary's 128 bytes
+t = open(os.path.join(out, 'tiff_rgb_strips.tif'), 'rb').read()
+mac = bytearray(128); mac[1] = 8; mac[2:10] = b'scan.tif'; mac[65:69] = b'TIFF'; mac[69:73] = b'8BIM'
+struct.pack_into('>I', mac, 83, len(t))
+write('tiff_macbinary.tif', bytes(mac) + t + bytes((-len(t)) % 128))
 rr16 = rgb_rows(21, 13, True)
 tiff('tiff_rgb16_mm.tif', True, tiff_strips(21, 13, 4, lambda y, p: rr16[y], 3, 16, be=True))
 gray = [bytes(((x // 5) * 30 + (y // 3) * 7) % 256 if (x + y) % 9 else 200 for x in range(53)) for y in range(31)]

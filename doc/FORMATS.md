@@ -14,7 +14,7 @@ work in place).
 |---|---|---|---|
 | PBM / PGM / PPM | raw | pbm 14, pgm 14, ppm 14 | done: binary, and plain (P1-P3) given back with its writer's formatting |
 | PAM, PFM | raw | pam 6, pfm 4 | done |
-| BMP | raw, bitfields; RLE4/RLE8 | bmp 42 | done: raw and bitfields (1 to 32 bits, OS/2 too), RLE8 and RLE4 whoever wrote them |
+| BMP | raw, bitfields; RLE4/RLE8 | bmp 42 | done: raw and bitfields (1 to 32 bits, OS/2 too), RLE8 and RLE4 whoever wrote them; a bare DIB (.dib), after MacBinary, cut short (its whole rows) |
 | Radiance HDR | RGBE + RLE | radiance 10 | done (Radiance's and stb's run-length coders, flat lines) |
 
 ## Batch 1: header + raw/RLE pixels
@@ -37,9 +37,9 @@ work in place).
 
 | Format | Notes | Corpus folder (files) | Status |
 |---|---|---|---|
-| DPX | 10-bit packed in 32-bit words | dpx 7 | **done**: 8, 10 (packing 1, 2), 12, 16 bits, floats; one image element |
+| DPX | 10-bit packed in 32-bit words | dpx 7 | **done**: 8, 10 (packing 1, 2), 12, 16 bits, floats; the first image element (the others as bytes) |
 | Cineon | same, predecessor of DPX | cin 13 | **done**: 8 bits, 10 bits packed |
-| FITS | big-endian int/float | fits 11 | **done**: 8, 16 bits, floats; three planes; not 32/64-bit integers, doubles |
+| FITS | big-endian int/float | fits 11 | **done**: 8, 16, 32 and 64-bit integers, floats and doubles; three planes; an image in each HDU (IMAGE extensions); not random groups |
 | VICAR | NASA/JPL | vicar 10 | **done**: BYTE, HALF, REAL (IEEE); BSQ, BIP |
 | DICOM uncompressed | 12/16-bit | dicom 11 | **done**: implicit and explicit VR, 8/16 bits, gray and RGB, frames; not compressed transfer syntaxes |
 | OpenEXR | uncompressed/RLE first, ZIP/PIZ later | exr 12 | **done** uncompressed scanlines; RLE, ZIP, PIZ, tiles, deep not yet |
@@ -48,7 +48,7 @@ work in place).
 
 | Format | Pixels | Corpus folder (files) | Status |
 |---|---|---|---|
-| TIFF / BigTIFF | raw / PackBits | tiff 126, bigTIFF 8 | **done**: strips and tiles, uncompressed or PackBits, 1 to 16 bits, floats, chunky or planar, every directory; LZW, Deflate, JPEG, CCITT stay as bytes |
+| TIFF / BigTIFF | raw / PackBits | tiff 126, bigTIFF 8 | **done**: strips and tiles, uncompressed or PackBits, 1 to 16 bits, floats, chunky or planar, every directory, after MacBinary too; LZW, Deflate, JPEG, CCITT stay as bytes |
 | PSD | raw / PackBits | psd 15 | **done**: the composite (interleaved) and each layer's channels and mask, raw or PackBits; PSB too; ZIP not yet |
 | IFF ILBM | ByteRun1, bitplanes | iffILBM 128 | **done**: ILBM (1-8, 24, 32 planes), PBM, ACBM, RGBN and RGB8 (Impulse's runs); not VDAT, mask planes |
 | MIFF | raw / RLE | miff 18 | **done**: PseudoClass and DirectClass (gray, RGB, CMYK, alpha), 8 and 16 bits, ImageMagick's RLE, old and new headers, montages; not Zip/BZip |

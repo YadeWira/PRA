@@ -362,9 +362,11 @@ type
   end;
 
 procedure MakePlan(const L: TRasterLayout; out P: TPlan);
-var c, i: Integer;
+var c, i, k: Integer;
 begin
+  { 32 and 64 bits: halves and quarters of 16 bits, each a sub-channel }
   if L.bits = 32 then begin P.nsub := 2 * L.channels; P.B := 16; end
+  else if L.bits = 64 then begin P.nsub := 4 * L.channels; P.B := 16; end
   else begin P.nsub := L.channels; P.B := L.bits; end;
   P.kbits := BitLen(P.B);
   { one channel: every sample of the row, the padding ones too (they are
@@ -391,6 +393,15 @@ begin
       P.order[i] := 2 * c + 1; Inc(i);
       P.ctxRef[2 * c + 1] := 2 * c;
     end;
+  end else if L.bits = 64 then begin
+    { each quarter after the one above it, of every channel: the top ones
+      first; a quarter's context is the one above it }
+    i := 0;
+    for k := 0 to 3 do
+      for c := 0 to L.channels - 1 do begin
+        P.order[i] := 4 * c + k; Inc(i);
+        if k > 0 then P.ctxRef[4 * c + k] := 4 * c + k - 1;
+      end;
   end else if L.channels >= 3 then begin
     P.order[0] := 1; P.order[1] := 0; P.order[2] := 2;
     P.predRef[0] := 1; P.predRef[2] := 1; P.ctxRef[0] := 1; P.ctxRef[2] := 1;
@@ -409,7 +420,7 @@ end;
 
 { row y of the pixels <-> its sub-samples }
 procedure LoadRow(const d: TBytes; const L: TRasterLayout; const P: TPlan; y: Integer; var row: array of Integer);
-var x, c: Integer; o: Int64; v: Cardinal;
+var x, c: Integer; o: Int64; v, hi: Cardinal;
 begin
   o := L.dataOffset + Int64(y) * L.rowBytes;
   for x := 0 to P.cw - 1 do
@@ -425,17 +436,36 @@ begin
         32: begin
           if L.bigEndian then v := (Cardinal(d[o]) shl 24) or (Cardinal(d[o + 1]) shl 16) or (Cardinal(d[o + 2]) shl 8) or d[o + 3]
           else v := (Cardinal(d[o + 3]) shl 24) or (Cardinal(d[o + 2]) shl 16) or (Cardinal(d[o + 1]) shl 8) or d[o];
-          v := FloatOrder(v);
+          { the samples in their order as numbers: floats by FloatOrder,
+            integers (two's complement) with the sign bit flipped }
+          if L.isFloat then v := FloatOrder(v) else v := v xor $80000000;
           row[x * P.nsub + 2 * c] := v shr 16;
           row[x * P.nsub + 2 * c + 1] := v and $FFFF;
           Inc(o, 4);
+        end;
+        64: begin
+          if L.bigEndian then begin
+            hi := (Cardinal(d[o]) shl 24) or (Cardinal(d[o + 1]) shl 16) or (Cardinal(d[o + 2]) shl 8) or d[o + 3];
+            v := (Cardinal(d[o + 4]) shl 24) or (Cardinal(d[o + 5]) shl 16) or (Cardinal(d[o + 6]) shl 8) or d[o + 7];
+          end else begin
+            hi := (Cardinal(d[o + 7]) shl 24) or (Cardinal(d[o + 6]) shl 16) or (Cardinal(d[o + 5]) shl 8) or d[o + 4];
+            v := (Cardinal(d[o + 3]) shl 24) or (Cardinal(d[o + 2]) shl 16) or (Cardinal(d[o + 1]) shl 8) or d[o];
+          end;
+          { as 32 bits: a negative double all inverted, an integer's sign flipped }
+          if L.isFloat and ((hi and $80000000) <> 0) then begin hi := not hi; v := not v; end
+          else hi := hi xor $80000000;
+          row[x * P.nsub + 4 * c] := hi shr 16;
+          row[x * P.nsub + 4 * c + 1] := hi and $FFFF;
+          row[x * P.nsub + 4 * c + 2] := v shr 16;
+          row[x * P.nsub + 4 * c + 3] := v and $FFFF;
+          Inc(o, 8);
         end;
       end;
     end;
 end;
 
 procedure StoreRow(var d: TBytes; const L: TRasterLayout; const P: TPlan; y: Integer; const row: array of Integer);
-var x, c: Integer; o: Int64; v: Cardinal;
+var x, c: Integer; o: Int64; v, hi: Cardinal;
 begin
   o := L.dataOffset + Int64(y) * L.rowBytes;
   for x := 0 to P.cw - 1 do
@@ -451,13 +481,28 @@ begin
           Inc(o, 2);
         end;
         32: begin
-          v := FloatUnorder((Cardinal(row[x * P.nsub + 2 * c]) shl 16) or Cardinal(row[x * P.nsub + 2 * c + 1]));
+          v := (Cardinal(row[x * P.nsub + 2 * c]) shl 16) or Cardinal(row[x * P.nsub + 2 * c + 1]);
+          if L.isFloat then v := FloatUnorder(v) else v := v xor $80000000;
           if L.bigEndian then begin
             d[o] := v shr 24; d[o + 1] := (v shr 16) and 255; d[o + 2] := (v shr 8) and 255; d[o + 3] := v and 255;
           end else begin
             d[o + 3] := v shr 24; d[o + 2] := (v shr 16) and 255; d[o + 1] := (v shr 8) and 255; d[o] := v and 255;
           end;
           Inc(o, 4);
+        end;
+        64: begin
+          hi := (Cardinal(row[x * P.nsub + 4 * c]) shl 16) or Cardinal(row[x * P.nsub + 4 * c + 1]);
+          v := (Cardinal(row[x * P.nsub + 4 * c + 2]) shl 16) or Cardinal(row[x * P.nsub + 4 * c + 3]);
+          if L.isFloat and ((hi and $80000000) = 0) then begin hi := not hi; v := not v; end
+          else hi := hi xor $80000000;
+          if L.bigEndian then begin
+            d[o] := hi shr 24; d[o + 1] := (hi shr 16) and 255; d[o + 2] := (hi shr 8) and 255; d[o + 3] := hi and 255;
+            d[o + 4] := v shr 24; d[o + 5] := (v shr 16) and 255; d[o + 6] := (v shr 8) and 255; d[o + 7] := v and 255;
+          end else begin
+            d[o + 7] := hi shr 24; d[o + 6] := (hi shr 16) and 255; d[o + 5] := (hi shr 8) and 255; d[o + 4] := hi and 255;
+            d[o + 3] := v shr 24; d[o + 2] := (v shr 16) and 255; d[o + 1] := (v shr 8) and 255; d[o] := v and 255;
+          end;
+          Inc(o, 8);
         end;
       end;
     end;
@@ -937,6 +982,7 @@ var n: Int64; bits, i: Integer;
 begin
   n := L.width * L.height * L.channels;
   if L.bits = 32 then n := 2 * n;
+  if L.bits = 64 then n := 4 * n;
   bits := 4;
   while (n > 0) and (bits < TABLE_BITS_MAX) do begin Inc(bits); n := n shr 1; end;
   if bits < TABLE_BITS_MIN then bits := TABLE_BITS_MIN;
@@ -1030,7 +1076,8 @@ begin
   case L.bits of
     1, 2, 4: Result := L.channels = 1;
     8, 16: Result := not L.isFloat;
-    32: Result := L.isFloat;
+    { floats, and integers (FITS's BITPIX 32 and 64) }
+    32, 64: Result := True;
   else Result := False;
   end;
   { every sample of a row in rowBytes; what is left is padding }

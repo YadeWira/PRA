@@ -404,6 +404,39 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
 
+### 15/11/2026: FITS of every BITPIX, BMP and TIFF from old Macs
+
+The samples FFS gathered for PRA (the corpus's image/fitsVariantes,
+dpxMultiElemento, exrVariantes, tiffDeflate), and the files of the
+corpus's BMP and TIFF sets PRA refused:
+
+- **32 and 64-bit samples.** The model codes a 32-bit integer as two
+  16-bit halves (its sign bit flipped, so the halves grow with the
+  number), as it did floats, and a 64-bit sample (FITS's BITPIX 64 and -64)
+  as four 16-bit quarters, the top ones first, each in the context of the
+  one above it; a double is put in order as a float is. FITS: BITPIX 32
+  2,079,360 -> 696,528 (xz -9e 750,508), 64 4,210,560 -> 1,534,351 (xz
+  1,664,720), -64 924,480 -> 265,134 (xz 297,220).
+- **FITS extensions.** Each HDU is a part: an image when it is the primary
+  one or an IMAGE extension, bytes otherwise (tables, an empty primary
+  HDU). HorseHead 39.4% (xz 46.8%), a TESS light curve with its small image
+  809,285 (xz 829,316). One loses: o4sp040b0_raw, 74,880 bytes of which
+  5,456 are pixels, 13,602 against xz's 8,620: its four headers are coded
+  each on its own, and xz sees what they share.
+- **DPX of several elements**: the first is the image, the rest its tail.
+  FFS's three samples are made (the other elements' descriptors are zeros
+  and their data the first one's again): PRA gives them back but codes the
+  repeat as bytes, 683 KB where xz makes 414 KB.
+- **BMP**: a bare DIB (no `BM` file header: abydos.dib 1,920,040 ->
+  44,642, xz 85,668), one after MacBinary's 128 bytes (026.BMP 2,364,800 ->
+  284,982, xz 561,884), one cut short (its whole rows the image, the rest
+  the tail: 029_011.bmp 262,144 -> 44,574, xz 58,004).
+- **TIFF after MacBinary**: ten files of the corpus, 20.2 MB -> 5.75 MB
+  (xz 8.80 MB); they were refused.
+
+Not done: OpenEXR beyond uncompressed scanlines (RLE, ZIP, PIZ, PXR24, B44,
+tiles, deep images), random groups.
+
 ### 15/11/2026: bands of 1 MiB
 
 A profile (callgrind) of the model on a photo: `TPixelCoder.Code` takes

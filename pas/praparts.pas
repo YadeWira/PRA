@@ -71,7 +71,7 @@ function SplitFile(const d: TBytes; st: TParseStatus; const L: TRasterLayout;
 
 implementation
 
-uses Math, pralimits, prapnm, praother, prarle;
+uses Math, pralimits, prapnm, praother, prarle, prasci;
 
 const
   MAX_PARTS = 1 shl 16;
@@ -1075,6 +1075,69 @@ begin
   Result := True;
 end;
 
+{ ---------- MacBinary ---------- }
+
+{ A MacBinary header (128 bytes: a zero, the name's length and the name, the
+  forks' lengths) before a file: where the file starts, 0 if none }
+function MacBinaryFirst(const d: TBytes): Int64;
+var n: Int64;
+begin
+  Result := 0;
+  if Length(d) <= 128 + 8 then Exit;
+  if (d[0] <> 0) or not (d[1] in [1..63]) or (d[74] <> 0) or (d[82] <> 0) then Exit;
+  n := (Int64(d[83]) shl 24) or (Int64(d[84]) shl 16) or (Int64(d[85]) shl 8) or Int64(d[86]);
+  if (n >= 8) and (n <= Length(d) - 128) then Result := 128;
+end;
+
+{ a TIFF after MacBinary's header: its parts, moved past the header, which
+  is bytes }
+function SplitMacTiff(const d: TBytes; var parts: TParts): Boolean;
+var sub: TBytes; inner: TParts; k: Integer;
+begin
+  Result := False;
+  if MacBinaryFirst(d) = 0 then Exit;
+  sub := Copy(d, 128, Length(d) - 128);
+  inner := nil;
+  if not SplitTiff(sub, inner) then Exit;
+  AddBytes(parts, 0, 128);
+  for k := 0 to High(inner) do
+    if inner[k].kind = pkImage then
+      { (a TIFF's images have no references: AddImage leaves them none) }
+      AddImage(parts, inner[k].first + 128, inner[k].len, inner[k].L)
+    else AddBytes(parts, inner[k].first + 128, inner[k].len);
+  Result := True;
+end;
+
+{ ---------- FITS: an image in each HDU ---------- }
+
+{ Each HDU (its header, its data, the padding to a block) is a part: an
+  image when ParseFitsHdu takes it (the primary one, an IMAGE extension),
+  bytes otherwise (a table, an empty primary HDU, random groups). True if
+  that makes more images than the primary HDU alone: two or more, or one
+  after a primary HDU that is not one. }
+function SplitFits(const d: TBytes; var parts: TParts): Boolean;
+var p, e, hl, dl: Int64; L: TRasterLayout; sub: TBytes; images: Integer; firstIsImage: Boolean;
+begin
+  Result := False;
+  p := 0; images := 0; firstIsImage := False;
+  while p < Length(d) do begin
+    if (Length(parts) >= MAX_PARTS) or not FitsHduSize(d, p, hl, dl) or (dl > Length(d) - p - hl) then begin
+      AddBytes(parts, p, Length(d) - p);
+      Break;
+    end;
+    e := p + hl + (dl + 2879) div 2880 * 2880;
+    if e > Length(d) then e := Length(d);
+    sub := Copy(d, p, e - p);
+    if (dl > 0) and (ParseFitsHdu(sub, p > 0, L) = psOk) and (L.dataOffset + L.dataLength <= e - p) then begin
+      AddImage(parts, p, e - p, L);
+      Inc(images);
+      if p = 0 then firstIsImage := True;
+    end else AddBytes(parts, p, e - p);
+    p := e;
+  end;
+  Result := (images >= 2) or ((images = 1) and not firstIsImage);
+end;
+
 function SplitFile(const d: TBytes; st: TParseStatus; const L: TRasterLayout;
                    out parts: TParts; out fmt: TRasterFormat): Boolean;
 begin
@@ -1086,13 +1149,21 @@ begin
         if L.dataOffset + L.dataLength < Length(d) then Result := SplitPnm(d, L, parts);
       rfDDS:
         if L.dataOffset + L.dataLength < Length(d) then Result := SplitDds(d, L, parts);
+      rfFITS:
+        if L.dataOffset + L.dataLength < Length(d) then Result := SplitFits(d, parts);
     end;
     if not Result then parts := nil;
     Exit;
   end;
   if SplitDcx(d, parts) then begin fmt := rfDCX; Exit(True); end;
   parts := nil;
+  if (Length(d) >= 9) and (d[0] = Ord('S')) and (d[1] = Ord('I')) and SplitFits(d, parts) then begin
+    fmt := rfFITS; Exit(True);
+  end;
+  parts := nil;
   if SplitTiff(d, parts) then begin fmt := rfTIFF; Exit(True); end;
+  parts := nil;
+  if SplitMacTiff(d, parts) then begin fmt := rfTIFF; Exit(True); end;
   parts := nil;
   if SplitPsd(d, parts) then begin fmt := rfPSD; Exit(True); end;
   parts := nil;

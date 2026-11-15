@@ -72,7 +72,7 @@ type
     format: TRasterFormat;
     width, height: Int64;         { pixels }
     channels: Integer;            { samples per pixel }
-    bits: Integer;                { per sample: 1, 8, 16 or 32 }
+    bits: Integer;                { per sample: 1, 2, 4, 8, 16, 32 or 64 }
     maxval: Int64;                { the format's declared maximum (a hint: samples may exceed it) }
     bigEndian: Boolean;           { for bits > 8 }
     isFloat: Boolean;             { 32-bit IEEE samples }
@@ -160,8 +160,8 @@ function SizeRows(var L: TRasterLayout; available: Int64): TParseStatus;
 var bitsPerRow: Int64;
 begin
   if (L.width < 1) or (L.height < 1) or (L.width > MAX_DIMENSION) or (L.height > MAX_DIMENSION)
-     or (L.channels < 1) or (L.channels > MAX_CHANNELS) or (L.bits < 1) or (L.bits > 32) then Exit(psMalformed);
-  { width <= 2^24, channels <= 2^8, bits <= 32: at most 2^37, no overflow }
+     or (L.channels < 1) or (L.channels > MAX_CHANNELS) or (L.bits < 1) or (L.bits > 64) then Exit(psMalformed);
+  { width <= 2^24, channels <= 2^8, bits <= 64: at most 2^38, no overflow }
   bitsPerRow := L.width * L.channels * L.bits;
   { rows padded: BMP to 4 bytes, Sun Raster to 2 }
   case L.format of

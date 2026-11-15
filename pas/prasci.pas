@@ -37,6 +37,13 @@ uses SysUtils, praraster;
 function ParseDpx(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseCineon(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseFits(const d: TBytes; out L: TRasterLayout): TParseStatus;
+{ an HDU of a FITS file, alone in d: the primary one (ext False) or an
+  IMAGE extension (ext True), as ParseFits reads the primary one }
+function ParseFitsHdu(const d: TBytes; ext: Boolean; out L: TRasterLayout): TParseStatus;
+{ the HDU at d[first..], of any kind: its header's bytes (whole blocks of
+  2880) and its data's (before the padding); False if its header does not
+  end in the file or does not say }
+function FitsHduSize(const d: TBytes; first: Int64; out hdrLen, dataLen: Int64): Boolean;
 function ParseVicar(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseDicom(const d: TBytes; out L: TRasterLayout): TParseStatus;
 function ParseExr(const d: TBytes; out L: TRasterLayout): TParseStatus;
@@ -154,7 +161,10 @@ begin
   L.Clear;
   Result := ReadDpxHead(d, 0, Length(d), x);
   if Result <> psOk then Exit;
-  if (x.elements <> 1) or (x.encoding <> 0) or (x.channels = 0) or (x.eol > 65536) then Exit(psUnsupported);
+  { several image elements: the first one is the image, the others (and
+    anything after them) its tail, as bytes }
+  if (x.elements < 1) or (x.elements > 8) or (x.encoding <> 0) or (x.channels = 0) or (x.eol > 65536) then
+    Exit(psUnsupported);
   L.format := rfDPX;
   L.width := x.w; L.height := x.h; L.channels := x.channels; L.bigEndian := x.be;
   L.dataOffset := x.offset;
@@ -290,15 +300,64 @@ end;
 
 { ---------- FITS ---------- }
 
+function FitsHduSize(const d: TBytes; first: Int64; out hdrLen, dataLen: Int64): Boolean;
+var card, key: string; bitpix, naxis, pcount, gcount, v, n, cards: Int64; k: Integer; axes: array[1..999] of Int64;
+begin
+  Result := False; hdrLen := 0; dataLen := 0;
+  bitpix := 0; naxis := -1; pcount := 0; gcount := 1; cards := 0;
+  for k := 1 to 999 do axes[k] := 0;
+  while True do begin
+    if (first + (cards + 1) * 80 > Length(d)) or (cards * 80 >= MAX_TEXT_HEADER) then Exit;
+    card := TextAt(d, first + cards * 80, 80);
+    key := TrimRight(Copy(card, 1, 8));
+    Inc(cards);
+    if key = 'END' then Break;
+    if Copy(card, 9, 2) <> '= ' then Continue;
+    if key = 'BITPIX' then begin if not IntAt(card, 11, bitpix) then Exit; end
+    else if key = 'NAXIS' then begin if not IntAt(card, 11, naxis) then Exit; end
+    else if key = 'PCOUNT' then begin if not IntAt(card, 11, pcount) then Exit; end
+    else if key = 'GCOUNT' then begin if not IntAt(card, 11, gcount) then Exit; end
+    else if (Length(key) >= 6) and (Copy(key, 1, 5) = 'NAXIS') and TryStrToInt64(Copy(key, 6, 3), v)
+            and (v >= 1) and (v <= 999) then begin
+      if not IntAt(card, 11, n) then Exit;
+      axes[v] := n;
+    end;
+  end;
+  if (bitpix <> 8) and (bitpix <> 16) and (bitpix <> 32) and (bitpix <> 64) and (bitpix <> -32) and (bitpix <> -64) then Exit;
+  if (naxis < 0) or (naxis > 999) or (pcount < 0) or (gcount < 0) then Exit;
+  hdrLen := (cards * 80 + 2879) div 2880 * 2880;
+  if naxis = 0 then Exit(True);
+  { the random groups' NAXIS1 is 0: it counts no axis }
+  n := 1;
+  for k := 1 to naxis do begin
+    v := axes[k];
+    if (k = 1) and (v = 0) then Continue;
+    if (v < 0) or ((v > 0) and (n > (High(Int64) shr 8) div v)) then Exit;
+    n := n * v;
+  end;
+  if (n > 0) and (pcount + n > (High(Int64) shr 8) div Max(gcount, 1)) then Exit;
+  dataLen := Abs(bitpix) div 8 * gcount * (pcount + n);
+  Result := True;
+end;
+
 function ParseFits(const d: TBytes; out L: TRasterLayout): TParseStatus;
-const MAGIC = 'SIMPLE  =';
+begin
+  Result := ParseFitsHdu(d, False, L);
+end;
+
+function ParseFitsHdu(const d: TBytes; ext: Boolean; out L: TRasterLayout): TParseStatus;
+const MAGIC = 'SIMPLE  ='; XMAGIC = 'XTENSION=';
 var
   k, i: Integer; card, key: string; bitpix, naxis, v: Int64; axes: array[1..9] of Int64; ended: Boolean;
   cards, n3: Int64;
 begin
   L.Clear;
   if Length(d) < 9 then Exit(psNotThis);
-  for i := 1 to 9 do if d[i - 1] <> Ord(MAGIC[i]) then Exit(psNotThis);
+  if ext then begin
+    for i := 1 to 9 do if d[i - 1] <> Ord(XMAGIC[i]) then Exit(psNotThis);
+    if Pos('''IMAGE', TextAt(d, 0, Min(80, Length(d)))) = 0 then Exit(psUnsupported);
+  end else
+    for i := 1 to 9 do if d[i - 1] <> Ord(MAGIC[i]) then Exit(psNotThis);
   if Length(d) < 2880 then Exit(psMalformed);
   bitpix := 0; naxis := -1; for i := 1 to 9 do axes[i] := -1;
   ended := False; cards := 0;
@@ -322,17 +381,20 @@ begin
   end;
   { SIMPLE = T (where the standard puts it, or anywhere after the '=') }
   key := Trim(Copy(TextAt(d, 0, 80), 10, 71));
-  if (key = '') or (key[1] <> 'T') then Exit(psUnsupported);
+  if not ext and ((key = '') or (key[1] <> 'T')) then Exit(psUnsupported);
   if (naxis < 1) or (naxis > 9) then Exit(psUnsupported);
   for k := 1 to naxis do if (axes[k] < 1) or (axes[k] > MAX_DIMENSION) then Exit(psUnsupported);
   L.format := rfFITS; L.bigEndian := True; L.bottomUp := True;
   case bitpix of
     8: L.bits := 8;
     16: L.bits := 16;
+    32: L.bits := 32;
+    64: L.bits := 64;
     -32: begin L.bits := 32; L.isFloat := True; end;
-  else begin L.format := rfNone; Exit(psUnsupported); end;   { 32 and 64-bit integers, doubles }
+    -64: begin L.bits := 64; L.isFloat := True; end;
+  else begin L.format := rfNone; Exit(psUnsupported); end;
   end;
-  if L.isFloat then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
+  if L.isFloat or (L.bits > 16) then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
   L.width := axes[1]; L.channels := 1;
   if naxis = 1 then L.height := 1 else L.height := axes[2];
   { a third axis of 2 to 4: planes; anything more, images one under another }
