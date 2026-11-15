@@ -1,32 +1,32 @@
 # PRA
 
-**packRaster Algorithm**: lossless recompression of uncompressed and
-RLE-coded raster images (PNM, BMP, Radiance HDR and more), in FreePascal,
-with a C core where it pays and some x86-64 assembly; no libraries.
+**packRaster Algorithm**: lossless recompression of **raster images**
+(Netpbm, BMP, Radiance HDR, TIFF, PSD, DPX, FITS, DICOM, OpenEXR and some
+forty more), in FreePascal, with some x86-64 assembly; no libraries. The
+spiritual successor of [packPNM](https://github.com/packjpg/packPNM): a
+new codec and format of its own, written from scratch (it does not read
+packPNM's files), smaller and verified before anything is written.
 
-The spiritual successor of [packPNM](https://github.com/packjpg/packPNM):
-written from scratch, with a codec and container of its own; it shares no
-code with packPNM and does not read its files.
+| Component | Status |
+|---|---|
+| CI | [![CI][ciBadge]][ciLink] |
+| Latest release | [![Release][relBadge]][relLink] |
 
 ```sh
-pra a image.ppm          # -> image.pra
+pra a image.ppm          # -> image.pra, about 61% smaller on a corpus of every format
 pra x image.pra          # -> image.ppm, the same file byte for byte
-pra list image.pra       # original size, stored size, hash
 ```
 
-The original comes back **byte for byte**, and nothing is written unless it
-verified: `a` decompresses its own result and compares it with the input
-first, and `x` checks the size and the BLAKE3 hash the `.pra` carries.
-Today PRA takes PBM, PGM and PPM (binary and plain text), PAM and PFM, BMP
-(uncompressed, bitfields, RLE8 and RLE4), Radiance HDR, TGA, PCX, SGI, Sun Raster (each
-raw and run-length, given back byte for byte whoever wrote it), farbfeld,
-WBMP, XWD, MTV, VIFF, VIPS and uncompressed DDS, and files of several
-images: ICO, CUR, DCX, Netpbm images in a row, DDS mipmaps; and film and
-science: DPX, Cineon (10 bits packed too), FITS, VICAR, uncompressed DICOM
-and uncompressed OpenEXR; and containers: TIFF and BigTIFF (uncompressed
-and PackBits), PSD and PSB (layers too), IFF ILBM, PBM, ACBM, RGBN and RGB8, MIFF,
-GIMP's XCF, Macintosh PICT; see
-[doc/FORMATS.md](doc/FORMATS.md) for what comes next.
+The original comes back **byte for byte**, header, comments, padding and
+whatever follows the image included, and nothing is written under an
+output's name unless it verified: compressing decompresses the result and
+compares it with the input before writing, and extracting checks the size
+and the BLAKE3 hash stored in the `.pra`.
+
+The formats are not fixed yet: until a 0.9.x release fixes them, a `.pra`
+made by one 0.x release may not open in a later one, which then refuses it
+with a reason, never gives back a wrong file
+([doc/STABILITY.md](doc/STABILITY.md)).
 
 PRA belongs to a family of recompressors that share that rule: the original
 comes back byte for byte, and nothing is written unless it verified.
@@ -37,55 +37,173 @@ comes back byte for byte, and nothing is written unless it verified.
 | **PRA** | raster images (PNM, BMP, TIFF, PSD, HDR, ...) | [packPNM](https://github.com/packjpg/packPNM) |
 | [PPA](https://github.com/YadeWira/PPA) | the PNG family (PNG, APNG, MNG, JNG) | [packPNG](https://github.com/YadeWira/packPNG) |
 | [PAIA](https://github.com/YadeWira/PAIA) | animated images (GIF, WebP, FLI/FLC, ANI, ...) | (new) |
-| [PJA](https://github.com/YadeWira/PJA) | JPEG and JPEG-LS | [packJPG](https://github.com/YadeWira/packJPG) |
+| [POA](https://github.com/YadeWira/POA) | Ogg (Vorbis, Opus, FLAC, Speex, Theora) | (new) |
+| [PDA](https://github.com/YadeWira/PDA) | documents (PDF, Office, OpenDocument, EPUB, CHM, ...) | (new) |
+| [PJA](https://github.com/YadeWira/PJA) | JPEG, JPEG-LS and JPEG 2000 | [packJPG](https://github.com/YadeWira/packJPG) |
 
-On the Netpbm, BMP and HDR files of a local corpus that both give back,
-PRA's output is 16% smaller than packPNM's; on all of them (136 MB, the ones
-packPNM refuses or does not give back counted at their size) PRA makes
-30.8% of the size and packPNM 86.9% ([doc/CODEC.md](doc/CODEC.md)).
+## What it handles
 
-## Speed and memory
+- **Netpbm and the simple rasters**: PBM, PGM, PPM (binary and plain
+  text), PAM, PFM; BMP (raw, bitfields, RLE8, RLE4, bare DIBs); TGA, PCX,
+  SGI, Sun Raster (raw and run-length, whoever wrote them), farbfeld, WBMP,
+  XWD, MTV, VIFF, VIPS, uncompressed DDS; Radiance HDR.
+- **Files of several images**: ICO, CUR, DCX, Netpbm images in a row, DDS
+  mipmaps and cube maps.
+- **Film and science**: DPX and Cineon (10 bits packed too), FITS (8 to 64
+  bits, floats and doubles, extensions), VICAR, uncompressed DICOM and
+  OpenEXR.
+- **Containers**: TIFF and BigTIFF (uncompressed and PackBits, strips and
+  tiles, every page), PSD and PSB (layers too; the composite coded against
+  them), IFF (ILBM, PBM, ACBM, RGBN, RGB8), MIFF, GIMP's XCF, Macintosh
+  PICT; MacBinary-wrapped files.
 
-About 0.6 MB/s a thread, both ways (decoding runs the same model), and the
-bands of a big image on several threads (`-th`, up to 8 by default):
+Inside a file it takes, what PRA does not model (a TIFF's LZW or JPEG
+strips, a PSD's ZIP channels) goes through as bytes; anything else `pra a`
+refuses, and says why ([details][wHandles]).
 
-| file | size | `a`, 8 threads | `x`, 8 threads | `a`, 1 thread |
-|---|---|---|---|---|
-| a 10-bit Cineon, 4096 x 3112 | 51 MB | 15 s, 675 MB | 13 s, 401 MB | 81 s, 300 MB |
-| a PSD of layers, 2400 x 3200 | 26 MB | 42 s, 716 MB | 38 s, 361 MB | |
-| a PPM, plain text | 11 MB | 8 s, 140 MB | 7 s, 74 MB | |
+## Install
 
-Memory grows with the threads: each band has its models, and `a` decodes
-each band beside it as it codes it, to check it.
-
-Status: 0.1.0, the first release ([the releases](https://github.com/YadeWira/PRA/releases)). Until 1.0.0 the stream and the container may change with no promise: a `.pra` made by a 0.x may not open in a later version. From 1.0.0 on, what is released is read for ever. The codec: [doc/CODEC.md](doc/CODEC.md); limits: [doc/POLICY.md](doc/POLICY.md). Built bottom-up, each layer with its tests:
-
-| Layer | Unit | Status |
-|---|---|---|
-| hash (BLAKE3-128) | `pas/prablake3.pas` | done, from PJA |
-| binary arithmetic coder | `pas/praarith.pas` | done, from PJA |
-| raster layout, limits | `pas/praraster.pas`, `pas/pralimits.pas` | done |
-| Netpbm parser (P1-P7, PF/Pf) | `pas/prapnm.pas` | done |
-| plain Netpbm text, any writer | `pas/praplain.pas` | done |
-| DPX, Cineon, FITS, VICAR, DICOM, OpenEXR | `pas/prasci.pas` | done |
-| TIFF, PSD (parts), IFF ILBM (bitplanes), PackBits | `pas/praparts.pas`, `pas/praother.pas`, `pas/prarle.pas` | done |
-| BMP and Radiance HDR parsers | `pas/prabmp.pas`, `pas/prahdr.pas` | done |
-| farbfeld, TGA, Sun Raster, WBMP, PCX, SGI, XWD, MTV, VIFF, VIPS, DDS | `pas/praother.pas` | done |
-| run-length files, any writer | `pas/prarle.pas` | done (TGA, PCX, Sun Raster, SGI, BMP) |
-| more formats | | [the list](doc/FORMATS.md) |
-| model (counters, mixers, APM, match models) | `pas/pramodel.pas`, `pas/pracodec.pas` | second version |
-| header and tail model | `pas/prabytes.pas` | first version |
-| several images a file (ICO, CUR, DCX, Netpbm, DDS) | `pas/praparts.pas` | done |
-| codec stream (versions 3 and 4) | `pas/pracodec.pas` | first version |
-| container (`.pra`) | `pas/praformat.pas`, `pas/prapack.pas`, `pas/prafs.pas` | done ([doc/FORMAT.md](doc/FORMAT.md)) |
-| command line (`pra`) | `pas/pracli.pas` | done ([doc/CLI.md](doc/CLI.md)) |
+Download the command for your platform from the [latest release][relLink]:
+Linux (x86-64, x86, arm64; glibc 2.34 or later), macOS (Apple silicon) or
+Windows (x64, x86). Each build is tested by CI on its own platform, and a
+`.pra` made on one opens on any other ([installing][wInstall],
+[platforms][wPlat]).
 
 ```sh
-./run_tests.sh      # needs Free Pascal 3.2.2 and python3; builds and tests everything
-fpc -O3 -dPRA_FAST -Fupas -Fipas -FUbuild -obuild/pra pas/pracli.pas   # just the command
+pra a *.tif --output-dir=packed   # compress many
+pra x packed/*.pra -o restored/   # and back
+pra list packed/*.pra             # sizes and hashes
+```
+
+The command's manual is [doc/CLI.md](doc/CLI.md).
+
+## Against other compressors
+
+File by file, every file of a local corpus under 20 MB (638 MB, the
+corpus's copies of each raster format), against xz and zstd and, on the
+formats it takes, packPNM. Each set's whole output against its input; a
+file a tool does not take, or does not give back byte for byte, counts at
+its own size ([how, and the details][wComp]).
+
+| set | files | size | xz -9e | zstd -19 | packPNM 1.6d | PRA |
+|---|---|---|---|---|---|---|
+| Netpbm (PBM, PGM, PPM, PAM, PFM) | 51 | 52.4 MB | 33.66% | 37.20% | 84.04% | **22.04%** |
+| BMP | 42 | 24.7 MB | 27.21% | 30.03% | 61.43% | **16.90%** |
+| Radiance HDR | 10 | 29.7 MB | 72.64% | 78.67% | 100.00% | **53.72%** |
+| TIFF and BigTIFF | 130 | 162.9 MB | 66.03% | 69.52% | - | **61.00%** |
+| PSD | 12 | 30.4 MB | 36.47% | 41.05% | - | **29.08%** |
+| film and science (DPX, Cineon, FITS, VICAR, DICOM, OpenEXR) | 58 | 119.4 MB | 37.82% | 41.95% | - | **29.09%** |
+| IFF, MIFF, XCF, PICT | 220 | 75.2 MB | 53.49% | 58.89% | - | **45.96%** |
+| the rest (TGA, PCX, SGI, Sun, ICO, DDS, XWD, ...) | 216 | 143.0 MB | 42.95% | 48.14% | - | **27.12%** |
+| **all** | 739 | 637.8 MB | 48.83% | 53.19% | - | **38.88%** |
+
+Speed on 20 Netpbm and BMP files both take (6.8 MB; two Xeon E5-2697A v4;
+"8 at once": `pra -th 8`, packPNM 8 processes):
+
+| | packPNM 1.6d | PRA |
+|---|---|---|
+| compress, 1 thread | **1.5 s** | 13.4 s |
+| decompress, 1 thread | **1.6 s** | 9.1 s |
+| compress, 8 at once | **0.35 s** | 2.7 s |
+| decompress, 8 at once | **0.45 s** | 3.2 s |
+
+PRA is the smallest on every set: about a fifth below xz -9e overall, and
+on Netpbm, BMP and HDR files a quarter to a third of what packPNM leaves
+(packPNM gives back none of the HDR files). packPNM is about 9 times
+faster; PRA codes about 0.3 MB/s a thread and decodes about 0.45 MB/s
+(the model runs both ways), and spreads a big image's bands and several
+files over the threads. On TIFF most of what PRA does not model is LZW,
+Deflate or JPEG data, coded as bytes.
+
+## Safe by design
+
+PRA's first rule is that the original comes back byte for byte, or nothing
+is written. Measured against packPNM on the same 20 files and the same
+damage ([how][wSafe]):
+
+| | PRA | packPNM 1.6d |
+|---|---|---|
+| 4,000 single-bit flips in the compressed file: a wrong file given back without an error | **0** | 3,745 |
+| stores a hash of the original | **yes** (BLAKE3) | no |
+| checks its output before writing it, by default | **yes** | no (`-ver` asks for it) |
+| writes through a symbolic link at the output's name | **no** | no (takes another name) |
+| killed while writing: a partial file under the output's name | **no** | yes |
+| written promise that its files keep opening | not yet (a 0.9.x release fixes them; until then a newer release refuses an old file, never misreads it) | no |
+
+It is design, not luck: a stored hash and size, a decode-and-compare before
+writing, a temporary that takes the output's name only when it is complete
+and on the disk (and is deleted on Ctrl-C), and a clean refusal of anything
+it does not understand. What it does not do: repair a damaged `.pra` (keep
+backups, or use an archiver with recovery records) or authenticate it (the
+hash catches accidents, not tampering).
+
+## Against archivers
+
+Not measured yet: PRA has no 7-Zip codec nor zpaq-std plugin for now (both
+planned, below). On its own, `pra` against xz and zstd is the table above.
+
+## In 7-Zip and zpaq-std
+
+Not yet. A 7-Zip codec (`libpra`, under the family's experimental method
+IDs `03 7F 3x`) and PRA's codecs for [zpaq-std](https://github.com/YadeWira/zpaq-std)'s
+`-sa` (each block with a ZPAQL decoder, so that any zpaq extracts it) are
+planned ([zpaq-std][wPlugin], [7-Zip][wLib]).
+
+## Reporting a bug
+
+```sh
+pra report scan.tif -o report.txt   # what happened, on which machine
+```
+
+It writes a plain-text report (PRA's build, the system, the command line,
+and the file's size, hash and structure, but no pixels, no header
+contents and no folder names) and prints a link that opens a [new
+issue][issues] with it filled in. `--with-file` puts a copy of the file
+beside it, to attach if you choose to ([details][wBugs],
+[doc/CLI.md](doc/CLI.md#checking-and-reporting)).
+
+## More
+
+The [wiki][wiki] has the rest: [benchmarks][wComp], [safety][wSafe],
+[building and testing][wBuild], [how it works][wHow], the [source
+layout][wLayout], [FreePascal pitfalls][wFpc] and the [release
+history][wRel]. The codec's full notes are in [doc/CODEC.md](doc/CODEC.md),
+the file format in [doc/FORMAT.md](doc/FORMAT.md), the formats taken and
+planned in [doc/FORMATS.md](doc/FORMATS.md), what does not change in
+[doc/STABILITY.md](doc/STABILITY.md), the limits in
+[doc/POLICY.md](doc/POLICY.md).
+
+## Building
+
+FreePascal 3.2 and python3; no C compiler:
+
+```sh
+./run_tests.sh                                                         # every test
+fpc -O3 -dPRA_FAST -Fupas -Fipas -FUbuild -obuild/pra pas/pracli.pas   # the command
 ```
 
 ## License
 
-MIT (see [LICENSE](LICENSE)). PRA is a new implementation: it takes ideas
-from packPNM (LGPLv3) but none of its code.
+MIT, see `LICENSE`. PRA takes ideas from packPNM (LGPLv3) but none of its
+code; several units come from [PJA](https://github.com/YadeWira/PJA) (MIT).
+See `NOTICE`.
+
+[ciBadge]: https://github.com/YadeWira/PRA/actions/workflows/ci.yml/badge.svg "Continuous Integration"
+[ciLink]: https://github.com/YadeWira/PRA/actions/workflows/ci.yml
+[relBadge]: https://img.shields.io/github/v/release/YadeWira/PRA "Latest release"
+[relLink]: https://github.com/YadeWira/PRA/releases/latest
+[issues]: https://github.com/YadeWira/PRA/issues/new?template=bug_report.yml
+[wiki]: https://github.com/YadeWira/PRA/wiki
+[wComp]: https://github.com/YadeWira/PRA/wiki/Benchmarks
+[wSafe]: https://github.com/YadeWira/PRA/wiki/Safety-and-robustness
+[wHandles]: https://github.com/YadeWira/PRA/wiki/What-PRA-handles
+[wInstall]: https://github.com/YadeWira/PRA/wiki/Installing
+[wPlat]: https://github.com/YadeWira/PRA/wiki/Platforms
+[wPlugin]: https://github.com/YadeWira/PRA/wiki/The-zpaq-std-plugin
+[wLib]: https://github.com/YadeWira/PRA/wiki/Library-and-7-Zip
+[wBugs]: https://github.com/YadeWira/PRA/wiki/Reporting-bugs
+[wBuild]: https://github.com/YadeWira/PRA/wiki/Building
+[wHow]: https://github.com/YadeWira/PRA/wiki/How-it-works
+[wLayout]: https://github.com/YadeWira/PRA/wiki/Source-layout
+[wFpc]: https://github.com/YadeWira/PRA/wiki/FreePascal-pitfalls
+[wRel]: https://github.com/YadeWira/PRA/wiki/Releases
