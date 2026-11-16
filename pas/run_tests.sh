@@ -17,8 +17,12 @@ echo "== source guards"
 python3 pas/collisions.py pas
 
 echo "== build"
+# the C part: PPA's deflate layer (vendor/ppa), objects found through -Fo
+sh scripts/build_c.sh "$OUT/c"
+if command -v nm > /dev/null && nm "$OUT"/c/*.o | grep ' U '; then echo "FAIL: the C objects need a library"; exit 1; fi
+VP=(-Fuvendor/ppa/pas -Fivendor/ppa/pas -Fo"$OUT/c")
 for prog in test_blake3 test_arith test_model test_pnm test_parsers test_codec test_format test_prafs fuzz_decode; do
-  $FPC -O2 -Fupas -Fipas -FU"$OUT" -FE"$OUT" "pas/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
+  $FPC -O2 -Fupas -Fipas "${VP[@]}" -FU"$OUT" -FE"$OUT" "pas/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 
@@ -40,7 +44,7 @@ rm -rf "$OUT/tmp_fs"; mkdir -p "$OUT/tmp_fs"; "$OUT/test_prafs" "$(realpath "$OU
 echo "== the command"
 mkdir -p "$OUT/cli"
 export PRA_COMMIT=${PRA_COMMIT:-$(git describe --always --dirty --abbrev=7 2>/dev/null || true)}
-$FPC -O3 -dPRA_FAST -Fupas -Fipas -FU"$OUT/cli" -o"$OUT/pra" pas/pracli.pas > "$OUT/fpc.log" 2>&1 \
+$FPC -O3 -dPRA_FAST -dPPA_FAST -Fupas -Fipas "${VP[@]}" -FU"$OUT/cli" -o"$OUT/pra" pas/pracli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 # the samples pra selftest carries, and the .pra of each: current
 python3 tools/gen_selftest.py --check "$OUT/pra"
@@ -48,7 +52,7 @@ pas/tests/cli.sh "$OUT/pra" "$OUT/tmp_cli" tests/pnm tests/bmp tests/hdr tests/o
 
 echo "== the fast build makes the same streams"
 mkdir -p "$OUT/fast"
-$FPC -O3 -dPRA_FAST -Fupas -Fipas -FU"$OUT/fast" -FE"$OUT/fast" pas/tests/test_codec.pas > "$OUT/fpc.log" 2>&1 \
+$FPC -O3 -dPRA_FAST -dPPA_FAST -Fupas -Fipas "${VP[@]}" -FU"$OUT/fast" -FE"$OUT/fast" pas/tests/test_codec.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/fast/test_codec" tests/bmp tests/hdr tests/other tests/multi tests/sci tests/cont > "$OUT/codec_fast.txt" || { cat "$OUT/codec_fast.txt"; exit 1; }
 a=$(grep '^streams ' "$OUT/codec.txt"); b=$(grep '^streams ' "$OUT/codec_fast.txt")

@@ -2,10 +2,11 @@
 """Writes pas/praselftest.inc: the samples `pra selftest` carries inside the
 binary, and the .pra each one has to give (doc/CLI.md, selftest).
 
-Nine small files of tests/ (about 20 KB), one for each way the codec takes
+Ten small files of tests/ (about 22 KB), one for each way the codec takes
 an image: 16-bit gray samples, RGB, 1-bit, palette indices, a side coding
-(BMP RLE8), Radiance's scanlines, floats, a file of several images (parts)
-and a PSD whose composite is coded against its layer. Each .pra is the one
+(BMP RLE8), Radiance's scanlines, floats, a file of several images (parts),
+a PSD whose composite is coded against its layer and a TIFF of Deflate
+strips (rebuilt by PPA's deflate layer). Each .pra is the one
 the given pra command makes of it; selftest checks every SIMD path and
 thread count still makes those very bytes. (From PJA's tools/gen_selftest.py.)
 
@@ -17,7 +18,8 @@ import os, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'pas', 'praselftest.inc')
 SAMPLES = ['pnm/gray16.pgm', 'pnm/crlf.ppm', 'pnm/shape.pbm', 'bmp/palette8.bmp', 'bmp/rle8_usual.bmp',
-           'hdr/stb.hdr', 'pnm/gray_be.pfm', 'multi/ico_three.ico', 'cont/psd_nearcopy.psd']
+           'hdr/stb.hdr', 'pnm/gray_be.pfm', 'multi/ico_three.ico', 'cont/psd_nearcopy.psd',
+           'cont/tiff_deflate_pred.tif']
 
 
 def pas_bytes(name, b):

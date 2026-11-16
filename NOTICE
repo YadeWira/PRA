@@ -17,3 +17,15 @@ packPNM
 
 PRA is the spiritual successor of packPNM by Matthias Stirner (LGPLv3). It
 takes ideas from it, not code.
+
+PPA's deflate layer
+-------------------
+
+vendor/ppa (the units ppapreflate, ppadeflate, ppazlib, ppaminiz, ppacorr,
+ppacrc, ppaarith, ppathreads, ppajoin, ppa.inc and the C files beside them)
+is PPA's deflate layer, copied as it is from the release tarball of PPA
+0.3.0 (github.com/YadeWira/PPA, tag v0.3.0, commit 8370a31; MIT, same
+author); vendor/ppa/SHA256SUMS has the tarball's hash of each file. It
+gives back a deflate stream bit for bit from the bytes it holds and a
+recipe. Its third-party notes (zlib's and miniz's choices ported, the idea
+of preflate) are in vendor/ppa/NOTICE.

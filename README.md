@@ -2,7 +2,8 @@
 
 **packRaster Algorithm**: lossless recompression of **raster images**
 (Netpbm, BMP, Radiance HDR, TIFF, PSD, DPX, FITS, DICOM, OpenEXR and some
-forty more), in FreePascal, with some x86-64 assembly; no libraries. The
+forty more), in FreePascal, with some x86-64 assembly (and PPA's deflate
+layer, partly C); no libraries. The
 spiritual successor of [packPNM](https://github.com/packjpg/packPNM): a
 new codec and format of its own, written from scratch (it does not read
 packPNM's files), smaller and verified before anything is written.
@@ -13,7 +14,7 @@ packPNM's files), smaller and verified before anything is written.
 | Latest release | [![Release][relBadge]][relLink] |
 
 ```sh
-pra a image.ppm          # -> image.pra, about 61% smaller on a corpus of every format
+pra a image.ppm          # -> image.pra, about 62% smaller on a corpus of every format
 pra x image.pra          # -> image.ppm, the same file byte for byte
 ```
 
@@ -52,13 +53,15 @@ comes back byte for byte, and nothing is written unless it verified.
 - **Film and science**: DPX and Cineon (10 bits packed too), FITS (8 to 64
   bits, floats and doubles, extensions), VICAR, uncompressed DICOM and
   OpenEXR.
-- **Containers**: TIFF and BigTIFF (uncompressed and PackBits, strips and
-  tiles, every page), PSD and PSB (layers too; the composite coded against
+- **Containers**: TIFF and BigTIFF (uncompressed, PackBits and Deflate,
+  strips and tiles, every page), PSD and PSB (layers too; the composite coded against
   them), IFF (ILBM, PBM, ACBM, RGBN, RGB8), MIFF, GIMP's XCF, Macintosh
   PICT; MacBinary-wrapped files.
 
-Inside a file it takes, what PRA does not model (a TIFF's LZW or JPEG
-strips, a PSD's ZIP channels) goes through as bytes; anything else `pra a`
+A Deflate strip is unpacked and its pixels coded, and the stream is made
+again bit for bit from them (PPA's deflate layer). Inside a file it takes,
+what PRA does not model (a TIFF's LZW or JPEG strips, a PSD's ZIP
+channels) goes through as bytes; anything else `pra a`
 refuses, and says why ([details][wHandles]).
 
 ## Install
@@ -90,12 +93,12 @@ its own size ([how, and the details][wComp]).
 | Netpbm (PBM, PGM, PPM, PAM, PFM) | 51 | 52.4 MB | 33.66% | 37.20% | 84.04% | **22.04%** |
 | BMP | 42 | 24.7 MB | 27.21% | 30.03% | 61.43% | **16.90%** |
 | Radiance HDR | 10 | 29.7 MB | 72.64% | 78.67% | 100.00% | **53.72%** |
-| TIFF and BigTIFF | 130 | 162.9 MB | 66.03% | 69.52% | - | **61.00%** |
+| TIFF and BigTIFF | 131 | 162.9 MB | 66.03% | 69.52% | - | **58.30%** |
 | PSD | 12 | 30.4 MB | 36.47% | 41.05% | - | **29.08%** |
 | film and science (DPX, Cineon, FITS, VICAR, DICOM, OpenEXR) | 58 | 119.4 MB | 37.82% | 41.95% | - | **29.09%** |
 | IFF, MIFF, XCF, PICT | 220 | 75.2 MB | 53.49% | 58.89% | - | **45.96%** |
 | the rest (TGA, PCX, SGI, Sun, ICO, DDS, XWD, ...) | 216 | 143.0 MB | 42.95% | 48.14% | - | **27.12%** |
-| **all** | 739 | 637.8 MB | 48.83% | 53.19% | - | **38.88%** |
+| **all** | 740 | 637.8 MB | 48.83% | 53.19% | - | **38.19%** |
 
 Speed on 20 Netpbm and BMP files both take (6.8 MB; two Xeon E5-2697A v4;
 "8 at once": `pra -th 8`, packPNM 8 processes):
@@ -112,8 +115,8 @@ on Netpbm, BMP and HDR files a quarter to a third of what packPNM leaves
 (packPNM gives back none of the HDR files). packPNM is about 9 times
 faster; PRA codes about 0.3 MB/s a thread and decodes about 0.45 MB/s
 (the model runs both ways), and spreads a big image's bands and several
-files over the threads. On TIFF most of what PRA does not model is LZW,
-Deflate or JPEG data, coded as bytes.
+files over the threads. On TIFF most of what PRA does not model is LZW
+or JPEG data, coded as bytes.
 
 ## Safe by design
 
@@ -175,17 +178,22 @@ planned in [doc/FORMATS.md](doc/FORMATS.md), what does not change in
 
 ## Building
 
-FreePascal 3.2 and python3; no C compiler:
+FreePascal 3.2, a C compiler (gcc or clang, for PPA's deflate layer in
+`vendor/ppa`) and python3:
 
 ```sh
-./run_tests.sh                                                         # every test
-fpc -O3 -dPRA_FAST -Fupas -Fipas -FUbuild -obuild/pra pas/pracli.pas   # the command
+./run_tests.sh                    # every test
+sh scripts/build_c.sh build/c     # the C part, then the command:
+fpc -O3 -dPRA_FAST -dPPA_FAST -Fupas -Fipas -Fuvendor/ppa/pas -Fivendor/ppa/pas -Fobuild/c \
+    -FUbuild -obuild/pra pas/pracli.pas
 ```
 
 ## License
 
 MIT, see `LICENSE`. PRA takes ideas from packPNM (LGPLv3) but none of its
-code; several units come from [PJA](https://github.com/YadeWira/PJA) (MIT).
+code; several units come from [PJA](https://github.com/YadeWira/PJA) (MIT), and
+the deflate layer in `vendor/ppa` is [PPA](https://github.com/YadeWira/PPA)'s
+(MIT), copied as it is.
 See `NOTICE`.
 
 [ciBadge]: https://github.com/YadeWira/PRA/actions/workflows/ci.yml/badge.svg "Continuous Integration"

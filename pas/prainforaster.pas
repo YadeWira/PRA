@@ -141,7 +141,7 @@ end;
 
 procedure DescribeStreamOf(const s: TBytes; maxRaw: QWord; n: TInfoNode);
 var parts: TStreamParts; v, k: Integer; st: TDecodeStatus; list, it, img: TInfoNode; cap: Int64;
-const KINDS: array[0..3] of string = ('bytes', 'image', 'copy', 'image against references');
+const KINDS: array[0..4] of string = ('bytes', 'image', 'copy', 'image against references', 'deflate streams');
 begin
   n.Num('bytes', Length(s));
   if maxRaw > QWord(High(Int64)) then cap := High(Int64) else cap := Int64(maxRaw);
@@ -151,7 +151,7 @@ begin
     n.Str('problem', DecodeStatusName(st));
     Exit;
   end;
-  if v = PARTS_STREAM then begin
+  if v in [PARTS_STREAM, DEFLATE_PARTS_STREAM] then begin
     n.Str('kind', 'parts');
     list := n.List('part_list');
     for k := 0 to High(parts) do begin
@@ -164,14 +164,20 @@ begin
       it.Num('bytes', parts[k].len);
       it.Num('stream_bytes', parts[k].streamLen);
       it.line := KINDS[parts[k].kind] + ', ' + IntToStr(parts[k].len) + ' B';
-      if parts[k].kind in [1, 3] then begin
+      if parts[k].kind = 4 then begin
+        it.Num('streams', parts[k].streams);
+        it.Num('inflated_bytes', parts[k].inflated);
+        it.line := it.line + ' (' + IntToStr(parts[k].streams) + ' stream(s), ' + IntToStr(parts[k].inflated) +
+                   ' B inflated)';
+      end;
+      if (parts[k].kind in [1, 3]) or ((parts[k].kind = 4) and (parts[k].L.width > 0)) then begin
         img := it.Obj('image');
         DescribeLayout(parts[k].L, img);
         img.Num('bands', parts[k].bands);
         it.line := it.line + ' -> ' + IntToStr(parts[k].streamLen) + ' B: ' + FormatName(parts[k].L.format) + ' ' +
                    IntToStr(parts[k].L.width) + ' x ' + IntToStr(parts[k].L.height) + ', ' +
                    IntToStr(parts[k].bands) + ' band(s)';
-      end else if parts[k].kind = 0 then
+      end else if parts[k].kind in [0, 4] then
         it.line := it.line + ' -> ' + IntToStr(parts[k].streamLen) + ' B';
     end;
   end else if Length(parts) = 1 then begin

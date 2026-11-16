@@ -18,8 +18,10 @@
 
   - TIFF and BigTIFF: each image file directory's strips or tiles,
     uncompressed or PackBits, as images (strips that follow each other
-    joined into one, tiles stacked into one as wide as a tile); the header,
-    the directories, anything else, bytes.
+    joined into one, tiles stacked into one as wide as a tile); Deflate's
+    the same, as deflate streams whose bytes, joined, are that image (with
+    the horizontal predictor's differences when the file has them); the
+    header, the directories, anything else, bytes.
   - XCF (GIMP, versions 0 to 3, run-length): each layer's, mask's and
     channel's first level (its tiles, one after another) an image; the
     rest (the structures, the tile pointers, the lower levels) bytes.
@@ -44,7 +46,11 @@ interface
 uses SysUtils, praraster;
 
 type
-  TPartKind = (pkBytes, pkImage);
+  { pkDeflate: deflate streams one after the other (zlib-framed or bare),
+    whose bytes, joined, are an image of layout L (header-less, offsets
+    from the joined bytes) with the TIFF predictor pred (1: none, 2:
+    horizontal differences; anything else: not an image) }
+  TPartKind = (pkBytes, pkImage, pkDeflate);
 
   { An image part's reference for one of its channels: a one-channel 8-bit
     image elsewhere in the file (a PSD layer's channel), as it is or
@@ -59,6 +65,9 @@ type
     first, len: Int64;             { where it is in the file }
     L: TRasterLayout;              { pkImage: its layout, offsets from first }
     refs: array of TPartRef;       { a channel's reference (len 0: none) }
+    streams: array of Int64;       { pkDeflate: each stream's length, from first on }
+    needs: array of Int64;         { pkDeflate: the bytes of L's rows each holds (the last, at least) }
+    pred: Integer;                 { pkDeflate: the TIFF predictor }
   end;
   TParts = array of TPart;
   TPartRefs = array of TPartRef;
@@ -99,7 +108,7 @@ begin
   end;
   SetLength(parts, n + 1);
   parts[n].kind := pkBytes; parts[n].first := first; parts[n].len := len;
-  parts[n].L.Clear; parts[n].refs := nil;
+  parts[n].L.Clear; parts[n].refs := nil; parts[n].streams := nil; parts[n].needs := nil; parts[n].pred := 1;
 end;
 
 procedure AddImage(var parts: TParts; first, len: Int64; const L: TRasterLayout);
@@ -108,7 +117,23 @@ begin
   n := Length(parts);
   SetLength(parts, n + 1);
   parts[n].kind := pkImage; parts[n].first := first; parts[n].len := len;
-  parts[n].L := L; parts[n].refs := nil;
+  parts[n].L := L; parts[n].refs := nil; parts[n].streams := nil; parts[n].needs := nil; parts[n].pred := 1;
+end;
+
+procedure AddDeflate(var parts: TParts; first: Int64; const streams, needs: array of Int64; const L: TRasterLayout;
+                     pred: Integer);
+var n, k: Integer;
+begin
+  n := Length(parts);
+  SetLength(parts, n + 1);
+  parts[n].kind := pkDeflate; parts[n].first := first; parts[n].len := 0;
+  parts[n].L := L; parts[n].refs := nil; parts[n].pred := pred;
+  SetLength(parts[n].streams, Length(streams));
+  SetLength(parts[n].needs, Length(needs));
+  for k := 0 to High(needs) do parts[n].needs[k] := needs[k];
+  for k := 0 to High(streams) do begin
+    parts[n].streams[k] := streams[k]; Inc(parts[n].len, streams[k]);
+  end;
 end;
 
 { ---------- Netpbm: one image after another ---------- }
@@ -299,6 +324,10 @@ type
     L: TRasterLayout;
     joinable: Boolean;      { rows that continue the region before (same image, plane) }
     key: Integer;           { which image and plane }
+    deflate: Boolean;       { a deflate stream (len), whose bytes are the rows (L) }
+    pred: Integer;          { deflate: the TIFF predictor }
+    streams: array of Int64;{ deflate, joined: each stream's length }
+    needs: array of Int64;  { deflate, joined: each stream's rows' bytes }
   end;
   TTiffRegions = array of TTiffRegion;
   TInt64Array = array of Int64;
@@ -349,11 +378,31 @@ end;
 procedure TiffImage(var t: TTiffReader; ifd: Int64; key: Integer; var regs: TTiffRegions);
 var
   n, e, es, tag: Int64; k, i, idx: Integer; vals: TInt64Array;
-  w, h, spp, bps, comp, planar, rps, tw, th, fmt: Int64;
+  w, h, spp, bps, comp, planar, rps, tw, th, fmt, pred: Int64;
   offs, cnts: TInt64Array; tiled: Boolean;
   planes, per, across, down, plane: Int64; L: TRasterLayout; rows, need, used: Int64; R: TTiffRegion;
+
+  { Deflate strips or tiles whose samples PRA does not code: their bytes,
+    each stream's, as bytes }
+  procedure DeflateBytes;
+  var j: Integer; Q: TTiffRegion;
+  begin
+    if (comp <> 8) and (comp <> 32946) then Exit;
+    for j := 0 to High(offs) do begin
+      if (offs[j] < 0) or (offs[j] > Length(t.d)) or (cnts[j] < 1) or (cnts[j] > Length(t.d) - offs[j]) then Continue;
+      Q.first := offs[j]; Q.len := cnts[j]; Q.L.Clear; Q.L.format := rfTIFF;
+      Q.joinable := j > 0; Q.key := key * 64;
+      Q.deflate := True; Q.pred := 1;
+      Q.streams := nil; SetLength(Q.streams, 1); Q.streams[0] := Q.len;
+      Q.needs := nil; SetLength(Q.needs, 1); Q.needs[0] := 0;
+      SetLength(regs, Length(regs) + 1);
+      regs[High(regs)] := Q;
+    end;
+  end;
+
 begin
   w := -1; h := -1; spp := 1; bps := 1; comp := 1; planar := 1; rps := -1; tw := -1; th := -1; fmt := 1;
+  pred := 1;
   offs := nil; cnts := nil; tiled := False;
   if t.big then begin n := t.U(ifd, 8); es := 20; e := ifd + 8; end
   else begin n := t.U(ifd, 2); es := 12; e := ifd + 2; end;
@@ -362,7 +411,7 @@ begin
     tag := t.U(e + k * es, 2);
     if tag < 0 then Exit;
     case Integer(tag) of
-      256, 257, 258, 259, 277, 278, 284, 322, 323, 339: begin
+      256, 257, 258, 259, 277, 278, 284, 317, 322, 323, 339: begin
         if not TagValues(t, e + k * es, vals) then Continue;
         case Integer(tag) of
           256: w := vals[0];
@@ -372,6 +421,7 @@ begin
           277: spp := vals[0];
           278: rps := vals[0];
           284: planar := vals[0];
+          317: pred := vals[0];
           322: tw := vals[0];
           323: th := vals[0];
           339: begin fmt := vals[0]; for i := 1 to High(vals) do if vals[i] <> fmt then Exit; end;
@@ -384,13 +434,16 @@ begin
   { tiles: TileWidth and TileLength say so, whichever tag the offsets are in
     (some writers put tiles in StripOffsets) }
   tiled := (tw > 0) and (th > 0);
-  if (comp <> 1) and (comp <> 32773) then Exit;
-  if (w < 1) or (h < 1) or (w > MAX_DIMENSION) or (h > MAX_DIMENSION) or (spp < 1) or (spp > 16) then Exit;
+  { uncompressed, PackBits, Deflate (Adobe's code and the old one) }
+  if (comp <> 1) and (comp <> 32773) and (comp <> 8) and (comp <> 32946) then Exit;
   { no byte counts (old writers): each strip as long as its pixels make it }
   if (offs = nil) or ((cnts <> nil) and (Length(offs) <> Length(cnts))) then Exit;
   if cnts = nil then begin
     SetLength(cnts, Length(offs));
     for k := 0 to High(cnts) do cnts[k] := Length(t.d) - Max(0, Min(offs[k], Length(t.d)));
+  end;
+  if (w < 1) or (h < 1) or (w > MAX_DIMENSION) or (h > MAX_DIMENSION) or (spp < 1) or (spp > 16) then begin
+    DeflateBytes; Exit;
   end;
   { the samples: chunky (all in a pixel) or planar (a plane each) }
   L.Clear;
@@ -402,23 +455,24 @@ begin
   if (bps < 8) and (L.channels > 1) and (L.channels * bps in [2, 4, 8]) then begin
     bps := L.channels * bps; L.channels := 1;
   end;
-  case Integer(Min(bps, 64)) of
-    1, 2, 4: if L.channels <> 1 then Exit else L.bits := bps;
+  case Integer(Min(bps, 65)) of
+    1, 2, 4: if L.channels <> 1 then begin DeflateBytes; Exit; end else L.bits := bps;
     8: L.bits := 8;
-    16: if (fmt = 1) or (fmt = 2) then L.bits := 16 else Exit;
-    32: if fmt = 3 then begin L.bits := 32; L.isFloat := True; end else Exit;
-  else Exit;
+    16: if (fmt = 1) or (fmt = 2) then L.bits := 16 else begin DeflateBytes; Exit; end;
+    32: if fmt = 3 then begin L.bits := 32; L.isFloat := True; end else begin DeflateBytes; Exit; end;
+    64: if fmt = 3 then begin L.bits := 64; L.isFloat := True; end else begin DeflateBytes; Exit; end;
+  else begin DeflateBytes; Exit; end;
   end;
   if L.isFloat then L.maxval := 0 else L.maxval := (Int64(1) shl L.bits) - 1;
   if tiled then begin
-    if (tw < 1) or (th < 1) or (tw > MAX_DIMENSION) or (th > MAX_DIMENSION) then Exit;
+    if (tw < 1) or (th < 1) or (tw > MAX_DIMENSION) or (th > MAX_DIMENSION) then begin DeflateBytes; Exit; end;
     across := (w + tw - 1) div tw; down := (h + th - 1) div th;
     per := across * down;
   end else begin
     if (rps < 1) or (rps > h) then rps := h;
     per := (h + rps - 1) div rps;
   end;
-  if per * planes <> Length(offs) then Exit;
+  if per * planes <> Length(offs) then begin DeflateBytes; Exit; end;
   for idx := 0 to Length(offs) - 1 do begin
     plane := idx div per; i := idx mod per;
     if tiled then begin L.width := tw; rows := th; end
@@ -433,7 +487,20 @@ begin
     { strips of one image continue each other; tiles stack, one under the
       other, into an image as wide as a tile: one model for them all }
     R.joinable := i > 0;
-    if comp = 1 then begin
+    R.deflate := False; R.pred := 1; R.streams := nil; R.needs := nil;
+    if (comp = 8) or (comp = 32946) then begin
+      { the stream as long as its byte count says: whether it is one, and
+        what its bytes are, the encoder finds out }
+      if (R.first < 0) or (R.first > Length(t.d)) or (cnts[idx] < 1) or (cnts[idx] > Length(t.d) - R.first) then Continue;
+      R.len := cnts[idx];
+      R.deflate := True; R.pred := Integer(Min(Max(pred, 0), 255));
+      SetLength(R.streams, 1); R.streams[0] := R.len;
+      SetLength(R.needs, 1); R.needs[0] := need;
+      R.L.dataLength := need;
+      SetLength(regs, Length(regs) + 1);
+      regs[High(regs)] := R;
+      Continue;
+    end else if comp = 1 then begin
       { uncompressed: the rows; a strip longer than its rows keeps the rest as bytes }
       if (cnts[idx] < need) or (R.first < 0) or (R.first + need > Length(t.d)) then Continue;
       R.len := need;
@@ -499,10 +566,17 @@ begin
   for k := 1 to High(regs) do
     if regs[k].joinable and (regs[k].key = regs[m].key) and (regs[k].first = regs[m].first + regs[m].len)
        and (regs[k].L.coding = regs[m].L.coding) and (regs[k].L.width = regs[m].L.width)
+       and (regs[k].deflate = regs[m].deflate) and (regs[k].pred = regs[m].pred)
        and (regs[m].L.height + regs[k].L.height <= MAX_DIMENSION) then begin
       Inc(regs[m].len, regs[k].len);
       Inc(regs[m].L.height, regs[k].L.height);
-      regs[m].L.dataLength := regs[m].len;
+      if regs[m].deflate then begin
+        Inc(regs[m].L.dataLength, regs[k].L.dataLength);
+        SetLength(regs[m].streams, Length(regs[m].streams) + 1);
+        regs[m].streams[High(regs[m].streams)] := regs[k].streams[0];
+        SetLength(regs[m].needs, Length(regs[m].needs) + 1);
+        regs[m].needs[High(regs[m].needs)] := regs[k].needs[0];
+      end else regs[m].L.dataLength := regs[m].len;
     end else begin
       Inc(m); regs[m] := regs[k];
     end;
@@ -512,7 +586,8 @@ begin
     if Length(parts) >= MAX_PARTS - 2 then Break;
     AddBytes(parts, p, regs[k].first - p);
     L := regs[k].L;
-    AddImage(parts, regs[k].first, regs[k].len, L);
+    if regs[k].deflate then AddDeflate(parts, regs[k].first, regs[k].streams, regs[k].needs, L, regs[k].pred)
+    else AddImage(parts, regs[k].first, regs[k].len, L);
     p := regs[k].first + regs[k].len;
   end;
   AddBytes(parts, p, Length(d) - p);
@@ -832,7 +907,7 @@ begin
   R.L.format := rfXCF; R.L.coding := CODING_XCF;
   R.L.width := w; R.L.height := h; R.L.channels := bpp; R.L.bits := 8; R.L.maxval := 255;
   R.L.dataOffset := 0; R.L.dataLength := used; R.L.rowBytes := w * bpp;
-  R.first := first; R.len := used; R.joinable := False; R.key := Length(regs);
+  R.first := first; R.len := used; R.joinable := False; R.key := Length(regs); R.deflate := False; R.pred := 1;
   SetLength(regs, Length(regs) + 1); regs[High(regs)] := R;
 end;
 
@@ -997,7 +1072,7 @@ begin
   if SizeRows(L, High(Int64) shr 2) <> psOk then Exit;
   L.dataLength := used;
   wr := 0;
-  R.first := q; R.len := used; R.L := L; R.joinable := False; R.key := Length(regs);
+  R.first := q; R.len := used; R.L := L; R.joinable := False; R.key := Length(regs); R.deflate := False; R.pred := 1;
   SetLength(regs, Length(regs) + 1); regs[High(regs)] := R;
   next := q + used;
   Result := True;
@@ -1020,7 +1095,7 @@ begin
   R.L.format := rfPICT; R.L.width := w; R.L.height := h; R.L.channels := 4; R.L.bits := 8; R.L.maxval := 255;
   R.L.bigEndian := True; R.L.dataOffset := 0; R.L.dataLength := dataSize;
   if SizeRows(R.L, dataSize) <> psOk then Exit;
-  R.first := id + idSize; R.len := dataSize; R.joinable := False; R.key := Length(regs);
+  R.first := id + idSize; R.len := dataSize; R.joinable := False; R.key := Length(regs); R.deflate := False; R.pred := 1;
   SetLength(regs, Length(regs) + 1); regs[High(regs)] := R;
 end;
 
@@ -1104,6 +1179,8 @@ begin
     if inner[k].kind = pkImage then
       { (a TIFF's images have no references: AddImage leaves them none) }
       AddImage(parts, inner[k].first + 128, inner[k].len, inner[k].L)
+    else if inner[k].kind = pkDeflate then
+      AddDeflate(parts, inner[k].first + 128, inner[k].streams, inner[k].needs, inner[k].L, inner[k].pred)
     else AddBytes(parts, inner[k].first + 128, inner[k].len);
   Result := True;
 end;

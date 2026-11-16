@@ -48,7 +48,7 @@ work in place).
 
 | Format | Pixels | Corpus folder (files) | Status |
 |---|---|---|---|
-| TIFF / BigTIFF | raw / PackBits | tiff 126, bigTIFF 8 | **done**: strips and tiles, uncompressed or PackBits, 1 to 16 bits, floats, chunky or planar, every directory, after MacBinary too; LZW, Deflate, JPEG, CCITT stay as bytes |
+| TIFF / BigTIFF | raw / PackBits / Deflate | tiff 126, bigTIFF 8 | **done**: strips and tiles, uncompressed, PackBits or Deflate (with the horizontal predictor too), 1 to 16 bits, floats and doubles, chunky or planar, every directory, after MacBinary too; Deflate of samples PRA does not code: their bytes unpacked; LZW, JPEG, CCITT stay as bytes |
 | PSD | raw / PackBits | psd 15 | **done**: the composite (interleaved) and each layer's channels and mask, raw or PackBits; PSB too; ZIP not yet |
 | IFF ILBM | ByteRun1, bitplanes | iffILBM 128 | **done**: ILBM (1-8, 24, 32 planes), PBM, ACBM, RGBN and RGB8 (Impulse's runs); not VDAT, mask planes |
 | MIFF | raw / RLE | miff 18 | **done**: PseudoClass and DirectClass (gray, RGB, CMYK, alpha), 8 and 16 bits, ImageMagick's RLE, old and new headers, montages; not Zip/BZip |

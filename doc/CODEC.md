@@ -22,6 +22,7 @@ up and the caller stores the file as it is.
 | 3 | `praparts` | files of several images: where each image is |
 | 4 | `prabytes` | the bytes kept (header, tail): a small byte model |
 | 5 | `pracodec` | the stream: layout, header, tail, pixels |
+| 2 | `vendor/ppa` (`ppapreflate`) | PPA's deflate layer: a deflate stream into its bytes and a recipe, and back bit for bit |
 
 ## Stream, version 4
 
@@ -76,6 +77,43 @@ parts       how many (varint), then each:
             (varints), its top left in this image (signed varints); then
             its stream as an image's
 ```
+
+## Stream of parts, version 5
+
+Version 3 with one more kind of part, used only when a file has one (a
+file without one is still written as version 3, as before): a release
+before it refuses the stream as a newer version's.
+
+```
+version     1 B     5
+parts       as version 3, and:
+  deflate streams (kind 4): their length in the file (varint); how many
+            streams (varint); each one's length in the file, the length of
+            the bytes it holds, its recipe's length (varints) and its recipe
+            (ppapreflate.RecipeBytes: PPA's recipe format 2, frozen by PPA);
+            the predictor, 1 B (1: none; 2: the TIFF horizontal predictor,
+            undone); how the bytes are coded, 1 B (0: a section of all the
+            streams' bytes joined; 1: their stream's length (varint), then
+            an image's stream, version 4, of those bytes)
+```
+
+A TIFF's Deflate strips (or tiles) that follow each other in the file are
+one such part, as its uncompressed strips are one image. The bytes the
+streams hold, joined, are the image the file's tags say, with whatever a
+last strip holds past its rows as the image's tail; with Predictor 2 (8
+and 16 bits) the differences are undone before coding, and made again
+when decoding. When the rows do not fit (a strip with fewer or more than
+its rows), or the samples are of a kind PRA does not code (12 bits, ...),
+the bytes are a section. Decoding: the image (or the section), the
+differences again, then each stream rebuilt from its bytes and recipe
+(`ppapreflate.Rebuild`); each must have its length.
+
+The encoder takes a stream only when PPA's layer gives it a recipe that
+rebuilds it bit for bit (`FindRecipe` checks), and the part only when it
+is smaller than the streams (else they are bytes); the predictor's undoing
+is checked to come back. A stream may hold at most 1040 times its length
+and a part at most 1 GiB: the decoder checks the lengths before
+allocating anything.
 
 **References.** A PSD layer that covers a quarter of the canvas or more
 gives the composite, channel by channel, a reference: its sample at the
@@ -403,6 +441,34 @@ input.viff 4,079 -> 3,030 (xz: 3,124 for the whole file), subimage.xv
 1,165 -> 181, wolf.xv 3,008 -> 1,612, fig41.xwd 8,835 -> 6,609, title.dds
 66,113 -> 28,158 (its mipmaps are its tail). About 0.6 MB/s, slower a byte
 than the pixels; a header is small.
+
+### 15/11/2026: Deflate in TIFF (stream version 5)
+
+PPA 0.3.0's deflate layer (`vendor/ppa`, copied as it is from its release
+tarball) gives back any deflate stream bit for bit from the bytes it holds
+and a recipe of a few bytes: zlib's parameters (kind 0), with its flushes
+(1), miniz's (2), or a predictor and its corrections (3, any stream). PRA
+unpacks a TIFF's Deflate strips and tiles with it and codes their pixels.
+
+The corpus's ten TIFF files with Deflate (8.3 MB): PRA refused them all
+before. Now (one thread):
+
+| file | size | xz -9e | PRA |
+|---|---|---|---|
+| cmyk-with-alpha.tif (CMYK+A, predictor) | 6,940,736 | 4,707,280 | 3,297,487 |
+| test.tiff | 509,400 | 477,048 | 219,615 |
+| abydos.tiff | 463,838 | 433,096 | 186,911 |
+| caspian.tif (doubles, planar) | 298,292 | 290,432 | 136,239 |
+| bad.tif | 42,944 | 43,012 | 27,876 |
+| ladoga.tif | 20,420 | 20,488 | 11,309 |
+
+and the small ones (fill4, separate, missing, cmap-blue-red) 7,909 ->
+4,031 (xz 4,944). FFS's tiffDeflate samples: 51,903 -> 26,391 (xz
+49,608). TIFF's 64-bit floats (SampleFormat 3, 64 bits) are now taken too,
+Deflate or not.
+
+The corpus's TIFF set (131 files under 20 MB, 162.9 MB): 61.00% -> 58.30%
+(xz -9e 66.03%); every set together 38.88% -> 38.19%.
 
 ### 15/11/2026: FITS of every BITPIX, BMP and TIFF from old Macs
 

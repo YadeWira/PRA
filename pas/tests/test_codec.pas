@@ -257,6 +257,21 @@ begin
       Check(EncodeFile(samples[k], s, why) and (DecodeFile(s, Length(samples[k]), back) = dsOk) and Same(back, samples[k]),
         Format('psd_nearcopy.psd, against its layer: back; %d -> %d', [Length(samples[k]), Length(s)]));
     end;
+  { a TIFF of Deflate strips: deflate streams (version 5) }
+  for k := 0 to High(samples) do
+    if names[k] = 'tiff_deflate_pred.tif' then begin
+      Check(EncodeFile(samples[k], s, why) and (s[0] = DEFLATE_PARTS_STREAM) and
+        (DecodeFile(s, Length(samples[k]), back) = dsOk) and Same(back, samples[k]),
+        Format('tiff_deflate_pred.tif, deflate streams (version 5): back; %d -> %d', [Length(samples[k]), Length(s)]));
+      Check(DecodeFile(s, Length(samples[k]) - 1, back) = dsTooBig, 'deflate streams: a cap one byte below the file: refused');
+      s2 := Copy(s, 0, Length(s)); s2[0] := PARTS_STREAM;
+      Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'deflate streams in a version 3 stream: damaged');
+      s2 := Copy(s, 0, Length(s)); SetLength(s2, Length(s) - 1);
+      Check(DecodeFile(s2, 1 shl 20, back) = dsBadStream, 'deflate streams: cut short by a byte: damaged');
+    end;
+  for k := 0 to High(samples) do
+    if names[k] = 'tiff_rgb_strips.tif' then
+      Check(EncodeFile(samples[k], s, why) and (s[0] = PARTS_STREAM), 'tiff_rgb_strips.tif, no deflate: still version 3');
   { version 1 (made by the code of f75c10f from tests/other/tga_rgb24.tga)
     is of the model before the match models: refused, not misread }
   s2 := ReadAll('pas/tests/stream_v1_tga.bin');
@@ -291,7 +306,11 @@ begin
   for i := 1 to 2000 do begin
     SetLength(dmg, 1 + Integer(Rand mod 60));
     for k := 0 to High(dmg) do dmg[k] := Byte(Rand);
-    if Odd(i) then dmg[0] := STREAM_VERSION else dmg[0] := 3;   { images, and parts }
+    case i mod 3 of                     { images, parts, parts with deflate streams }
+      0: dmg[0] := IMAGE_STREAM;
+      1: dmg[0] := PARTS_STREAM;
+    else dmg[0] := DEFLATE_PARTS_STREAM;
+    end;
     try
       st := DecodeFile(dmg, 100000, back);
       if (st = dsOk) and (Length(back) > 100000) then Inc(bad);

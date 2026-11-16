@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install the 32-bit C library
+      - name: Install the 32-bit C library and compiler
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
@@ -67,6 +67,7 @@ jobs:
       - name: Test
         env:
           FPC: /tmp/fpc-i386/fpc
+          CC: gcc -m32
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -99,10 +100,14 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc
       - name: Test
         shell: bash
         env:
           FPC: fpc -Px86_64
+          CC: /c/msys64/mingw64/bin/gcc
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -128,10 +133,14 @@ jobs:
           $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
           if (-not $fpc) { throw 'fpc.exe not found after the installer' }
           Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
+        shell: pwsh
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-i686-gcc
       - name: Test
         shell: bash
         env:
           FPC: fpc -Pi386
+          CC: /c/msys64/mingw32/bin/gcc
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:

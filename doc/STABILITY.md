@@ -38,10 +38,11 @@ BLAKE3-128 and extension. Not fixed yet.
 |---|---|---|
 | 4 | the command since 0.1.0 | one image: its header and tail, its layout and coding, its bands, the pixels through the model |
 | 3 | the command since 0.1.0 | a file of several parts: images (each a version 4 stream, alone or against references), copies of earlier bytes, and bytes |
+| 5 | the command, after 0.2.0 | version 3 with deflate streams among the parts (a TIFF's Deflate strips): each stream's recipe in PPA's recipe format 2, which PPA froze in 0.3.0; written only when a file has such a part |
 
-Versions 1 and 2 were never released: a release refuses them. Versions 5
+Versions 1 and 2 were never released: a release refuses them. Versions 6
 and up are left for later, and a release refuses one it does not know as
-`FutureVersion`.
+`FutureVersion` (0.1.0 and 0.2.0 refuse version 5 so).
 
 ## The library, 7-Zip and zpaq-std
 

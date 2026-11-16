@@ -42,8 +42,11 @@ const
     released: their streams are refused. }
   IMAGE_STREAM = 4;
   PARTS_STREAM = 3;
+  { a file of parts some of which are deflate streams (PART_DEFLATE): a
+    version of its own, so that a release before it says it is newer }
+  DEFLATE_PARTS_STREAM = 5;
   OLD_IMAGE_STREAM = 2;
-  STREAM_VERSION = IMAGE_STREAM;
+  STREAM_VERSION = DEFLATE_PARTS_STREAM;
   PRA_VERSION = '0.2.0';
 
 var
@@ -87,18 +90,22 @@ function DecodeStatusName(st: TDecodeStatus): string;
 type
   { a stream's part, as info and --stats tell it (DescribeStream): what it
     is (0 bytes, 1 an image, 2 a copy of earlier bytes, 3 an image coded
-    against references), its bytes in the file, its stream's; an image's
-    layout and bands }
+    against references, 4 deflate streams), its bytes in the file, its
+    stream's; an image's layout and bands (deflate streams: of their bytes,
+    when they are coded as an image; streams says how many) }
   TStreamPart = record
     kind: Integer;
     len, streamLen: Int64;
     L: TRasterLayout;
     mode, bands: Integer;
+    streams: Int64;
+    inflated: Int64;
   end;
   TStreamParts = array of TStreamPart;
 
 { What a stream holds, from its headers alone (no pixel decoded): its
-  version (IMAGE_STREAM or PARTS_STREAM) and its parts (one for an image). }
+  version (IMAGE_STREAM, PARTS_STREAM or DEFLATE_PARTS_STREAM) and its
+  parts (one for an image). }
 function DescribeStream(const s: TBytes; maxOut: Int64; out streamVersion: Integer; out parts: TStreamParts): TDecodeStatus;
 { the bands of every image in it; 0 if it does not read }
 function StreamBands(const s: TBytes; maxOut: Int64): Integer;
@@ -114,7 +121,8 @@ function EncodeImage(const d: TBytes; const L: TRasterLayout; out s: TBytes; out
 
 implementation
 
-uses Math, praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain, prasci;
+uses Math, praarith, pramodel, pralimits, prapnm, prabmp, prahdr, praother, prarle, prabytes, praparts, praplain, prasci,
+  ppadeflate, ppapreflate;
 
 function DecodeImage(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer; ref: PRefPlanes): TDecodeStatus; forward;
 
@@ -1882,12 +1890,245 @@ end;
 { orig: the encoder's check of the frame, the images (each verified when
   it was coded) taken from the original instead of decoded again; but an
   image with references is decoded, as the decoder will }
+{ ---------- deflate streams (PART_DEFLATE, version 5) ----------
+
+  A part made of deflate streams one after the other (a TIFF's Deflate
+  strips): their count, then for each its length in the file, the length
+  of the bytes it holds and its recipe (ppapreflate.RecipeBytes, PPA's
+  format 2, frozen there), all varints but the recipe's bytes, which
+  follow their length; then the predictor, 1 B (1: the bytes as they are;
+  2: the bytes coded are the TIFF horizontal predictor's differences
+  undone, and are made differences again); then the bytes of all the
+  streams joined, as a section (PLAIN_BYTES) or as an image's stream
+  (PLAIN_IMAGE: its length, then the stream, version 4). Rebuilding each
+  stream from its bytes and its recipe gives the part. }
+const
+  PART_DEFLATE = 4;
+  PLAIN_BYTES = 0;
+  PLAIN_IMAGE = 1;
+  { deflate holds at most about 1032 bytes in a byte (a match of 258 in two
+    bits); the bytes of a part, at most a gigabyte }
+  MAX_INFLATE_RATIO = 1040;
+  MAX_INFLATED = 1 shl 30;
+
+{ the bytes a stream of len bytes may say it holds }
+function InflateCap(len: Int64): Int64;
+begin
+  if len >= MAX_INFLATED div MAX_INFLATE_RATIO then Result := MAX_INFLATED
+  else Result := len * MAX_INFLATE_RATIO + 64;
+end;
+
+{ The TIFF horizontal predictor (Predictor 2) on b, rows of L (8 or 16-bit
+  samples, the 16-bit in L's byte order): undo turns its differences into
+  the samples, else the samples into the differences, modulo 2^bits.
+  PredictorFits: whether L's rows are b's bytes exactly. }
+function PredictorFits(const L: TRasterLayout; len: Int64): Boolean;
+begin
+  Result := not L.isFloat and ((L.bits = 8) or (L.bits = 16)) and (L.channels >= 1) and (L.width >= 1)
+    and (L.height >= 1) and (L.coding = 0) and (L.dataOffset = 0)
+    and (L.width * L.channels * (L.bits div 8) * L.height = L.dataLength) and (L.dataLength <= len);
+end;
+
+procedure TiffPredictor(var b: TBytes; const L: TRasterLayout; undo: Boolean);
+var y, i, rl, base, step: SizeInt; v, u: Integer;
+
+  function Get16(at: SizeInt): Integer; inline;
+  begin
+    if L.bigEndian then Result := (b[at] shl 8) or b[at + 1] else Result := b[at] or (b[at + 1] shl 8);
+  end;
+  procedure Put16(at: SizeInt; x: Integer); inline;
+  begin
+    if L.bigEndian then begin b[at] := Byte(x shr 8); b[at + 1] := Byte(x and $FF); end
+    else begin b[at] := Byte(x and $FF); b[at + 1] := Byte(x shr 8); end;
+  end;
+
+begin
+  rl := SizeInt(L.width) * L.channels * (L.bits div 8);
+  step := L.channels * (L.bits div 8);
+  for y := 0 to SizeInt(L.height) - 1 do begin
+    base := y * rl;
+    if L.bits = 8 then begin
+      if undo then begin
+        for i := base + step to base + rl - 1 do b[i] := Byte((b[i] + b[i - step]) and $FF);
+      end else begin
+        i := base + rl - 1;
+        while i >= base + step do begin b[i] := Byte((b[i] - b[i - step]) and $FF); Dec(i); end;
+      end;
+    end else begin
+      if undo then begin
+        i := base + step;
+        while i < base + rl do begin
+          Put16(i, (Get16(i) + Get16(i - step)) and $FFFF); Inc(i, 2);
+        end;
+      end else begin
+        i := base + rl - 2;
+        while i >= base + step do begin
+          v := Get16(i); u := Get16(i - step);
+          Put16(i, (v - u) and $FFFF); Dec(i, 2);
+        end;
+      end;
+    end;
+  end;
+end;
+
+{ A pkDeflate part: everything after its kind and length. False when one
+  of its streams is not deflate or PPA has no recipe for it: the part is
+  then bytes. }
+function EncodeDeflate(const d: TBytes; const part: TPart; threads: Integer; out blob: TBytes): Boolean;
+var
+  o: TSink; k: Integer; at, total: Int64; a, plain, rb, img, back: TBytes; z: TZStream; r: TDeflRecipe;
+  pred: Integer; why: string; plains: array of TBytes; rowsFit: Boolean;
+begin
+  blob := nil; Result := False;
+  if Length(part.streams) < 1 then Exit;
+  o.Init;
+  o.PutVarint(Length(part.streams));
+  at := part.first; total := 0; rowsFit := Length(part.needs) = Length(part.streams);
+  plains := nil; SetLength(plains, Length(part.streams));
+  for k := 0 to High(part.streams) do begin
+    a := Copy(d, at, part.streams[k]);
+    if not Parse(a, dfAuto, InflateCap(Length(a)), z).Ok then Exit;
+    if FindRecipe(a, z, r, RECIPE_KIND_LAST, threads) <> ppapreflate.dsOk then Exit;
+    rb := RecipeBytes(r);
+    if total + Length(z.plain) > MAX_INFLATED then Exit;
+    o.PutVarint(Length(a));
+    o.PutVarint(Length(z.plain));
+    o.PutVarint(Length(rb));
+    o.PutBytes(rb, 0, Length(rb));
+    plains[k] := z.plain;
+    { each stream the rows the file says, the last one maybe more (they
+      are the image's tail) }
+    if rowsFit and ((Length(z.plain) < part.needs[k]) or ((k < High(part.streams)) and (Length(z.plain) <> part.needs[k]))) then
+      rowsFit := False;
+    Inc(total, Length(z.plain)); Inc(at, Length(a));
+  end;
+  plain := nil; SetLength(plain, total);
+  at := 0;
+  for k := 0 to High(plains) do begin
+    if Length(plains[k]) > 0 then Move(plains[k][0], plain[at], Length(plains[k]));
+    Inc(at, Length(plains[k]));
+  end;
+  plains := nil;
+  { the bytes as the image the file says, or as bytes }
+  img := nil; pred := 1;
+  if rowsFit and (part.L.width > 0) and (part.L.dataLength <= total) and (part.pred in [1, 2])
+     and ((part.pred = 1) or PredictorFits(part.L, total)) then begin
+    pred := part.pred;
+    if pred = 2 then begin
+      { undone, and checked to come back }
+      back := Copy(plain, 0, total);
+      TiffPredictor(back, part.L, True);
+      img := Copy(back, 0, total);
+      TiffPredictor(img, part.L, False);
+      if (total > 0) and not CompareMem(@img[0], @plain[0], total) then begin img := nil; back := nil; pred := 1; end
+      else plain := back;
+    end;
+    if not EncodeImage(plain, part.L, img, why, threads) or (Length(img) >= total) then img := nil;
+  end;
+  if img = nil then begin
+    if pred = 2 then TiffPredictor(plain, part.L, False);
+    o.Put(1);
+    o.Put(PLAIN_BYTES);
+    PutSection(o, plain, 0, total);
+  end else begin
+    o.Put(pred);
+    o.Put(PLAIN_IMAGE);
+    o.PutVarint(Length(img));
+    o.PutBytes(img, 0, Length(img));
+  end;
+  { deflate may do better on them than the byte model: then the streams
+    are bytes }
+  if o.n >= part.len then Exit;
+  blob := o.Done;
+  Result := True;
+end;
+
+{ What a PART_DEFLATE holds, read from src (after its kind and length,
+  len): with decode, the part's bytes (part); without, only its frame read
+  and checked (count, the image's layout for DescribeStream). }
+function DecodeDeflate(var src: TSource; len: Int64; decode: Boolean; threads: Integer; out part: TBytes;
+                       out count: Int64; out plainTotal: Int64; out hd: TStreamHead; out isImage: Boolean;
+                       out coded: Int64): TDecodeStatus;
+var
+  m, k: SizeInt; fileLen, plainLen, rlen, slen, at, sum: Int64; pos: SizeInt; pred, how: Integer;
+  recipes: array of TDeflRecipe; lens, plainLens: array of Int64; plain, piece, stream: TBytes; st: TDecodeStatus;
+begin
+  part := nil; count := 0; plainTotal := 0; isImage := False; coded := 0;
+  hd.L.Clear;
+  { a stream takes at least 4 bytes here }
+  m := src.GetVarint(Min(len, (Length(src.b) - src.p) div 4));
+  if not src.ok or (m < 1) then Exit(dsBadStream);
+  recipes := nil; lens := nil; plainLens := nil;
+  SetLength(recipes, m); SetLength(lens, m); SetLength(plainLens, m);
+  sum := 0;
+  for k := 0 to m - 1 do begin
+    fileLen := src.GetVarint(len - sum);
+    if not src.ok or (fileLen < 1) then Exit(dsBadStream);
+    plainLen := src.GetVarint(InflateCap(fileLen));
+    if not src.ok or (plainTotal + plainLen > MAX_INFLATED) then Exit(dsBadStream);
+    { what is left of the stream codes those bytes: no more than the
+      container lets a payload make (a bomb is refused before allocating) }
+    if plainTotal + plainLen > Int64(Length(src.b) - src.p) * MAX_EXPANSION_RATIO then Exit(dsBadStream);
+    rlen := src.GetVarint(Length(src.b) - src.p);
+    if not src.ok then Exit(dsBadStream);
+    pos := src.p;
+    if ReadRecipe(src.b, pos, plainLen, fileLen, recipes[k]) <> rrOk then Exit(dsBadStream);
+    if pos - src.p <> rlen then Exit(dsBadStream);
+    src.p := pos;
+    lens[k] := fileLen; plainLens[k] := plainLen;
+    Inc(sum, fileLen); Inc(plainTotal, plainLen);
+  end;
+  if sum <> len then Exit(dsBadStream);
+  count := m;
+  pred := src.Get; how := src.Get;
+  if not src.ok or not (pred in [1, 2]) or not (how in [PLAIN_BYTES, PLAIN_IMAGE]) then Exit(dsBadStream);
+  if (how = PLAIN_BYTES) and (pred <> 1) then Exit(dsBadStream);
+  plain := nil;
+  if how = PLAIN_BYTES then begin
+    at := src.p;
+    if (src.GetVarint(plainTotal) <> plainTotal) or not src.ok then Exit(dsBadStream);
+    if not GetSection(src, IMAGE_STREAM, plainTotal, plain) then Exit(dsBadStream);
+    coded := src.p - at;
+  end else begin
+    slen := src.GetVarint(Length(src.b) - src.p);
+    if not src.ok or (slen < 1) or (src.b[src.p] <> IMAGE_STREAM) then Exit(dsBadStream);
+    coded := slen;
+    piece := Copy(src.b, src.p, slen);
+    st := ReadStream(piece, plainTotal, hd);
+    if st <> dsOk then Exit(st);
+    isImage := True;
+    if (pred = 2) and not PredictorFits(hd.L, plainTotal) then Exit(dsBadStream);
+    if decode then begin
+      st := DecodeImage(piece, plainTotal, plain, threads, nil);
+      if st <> dsOk then Exit(st);
+      if Length(plain) <> plainTotal then Exit(dsBadStream);
+      if pred = 2 then TiffPredictor(plain, hd.L, False);
+    end;
+    Inc(src.p, slen);
+  end;
+  if not decode then Exit(dsOk);
+  { each stream rebuilt from its bytes }
+  SetLength(part, len);
+  at := 0; sum := 0;
+  for k := 0 to m - 1 do begin
+    piece := Copy(plain, at, plainLens[k]);
+    if not Rebuild(piece, recipes[k], stream, threads) or (Length(stream) <> lens[k]) then begin
+      part := nil; Exit(dsBadStream);
+    end;
+    Move(stream[0], part[sum], lens[k]);
+    Inc(at, plainLens[k]); Inc(sum, lens[k]);
+  end;
+  Result := dsOk;
+end;
+
 function DecodeParts(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer;
                      orig: PTBytes = nil): TDecodeStatus;
-var src: TSource; n, k: SizeInt; len, slen, total, from: Int64; kind: Integer; part: TBytes; st: TDecodeStatus;
-  refs: TPartRefs; hd: TStreamHead; Rp: TRefPlanes; hasRef: Boolean; sub: TBytes;
+var src: TSource; n, k: SizeInt; len, slen, total, from: Int64; kind, lastKind: Integer; part: TBytes; st: TDecodeStatus;
+  refs: TPartRefs; hd: TStreamHead; Rp: TRefPlanes; hasRef, isImage: Boolean; sub: TBytes; cnt, plainTotal, coded: Int64;
 begin
   d := nil;
+  if (Length(s) = 0) or not (s[0] in [PARTS_STREAM, DEFLATE_PARTS_STREAM]) then Exit(dsBadStream);
+  if s[0] = DEFLATE_PARTS_STREAM then lastKind := PART_DEFLATE else lastKind := PART_REF;
   src.b := s; src.p := 1; src.ok := True;
   { a part takes at least two bytes of the stream }
   n := src.GetVarint(Length(s));
@@ -1896,12 +2137,20 @@ begin
   for k := 1 to n do begin
     kind := src.Get;
     len := src.GetVarint(High(Int64) shr 1);
-    if not src.ok or (kind > PART_REF) then Exit(dsBadStream);
-    if len > maxOut - total then Exit(dsTooBig);
+    if not src.ok or (kind > lastKind) then begin d := nil; Exit(dsBadStream); end;
+    if len > maxOut - total then begin d := nil; Exit(dsTooBig); end;
     if kind = PART_COPY then begin
       from := src.GetVarint(total);
       if not src.ok or (len < 1) or (len > total - from) then begin d := nil; Exit(dsBadStream); end;
       part := Copy(d, from, len);
+    end else if kind = PART_DEFLATE then begin
+      { the encoder's check: the streams and the image came back already,
+        the frame is read; the bytes are the original's }
+      if (orig <> nil) and (total + len > Length(orig^)) then begin d := nil; Exit(dsBadStream); end;
+      st := DecodeDeflate(src, len, orig = nil, threads, part, cnt, plainTotal, hd, isImage, coded);
+      if st <> dsOk then begin d := nil; Exit(st); end;
+      if orig <> nil then part := Copy(orig^, total, len);
+      if Length(part) <> len then begin d := nil; Exit(dsBadStream); end;
     end else if kind = PART_BYTES then begin
       if not GetSection(src, IMAGE_STREAM, len, part) then Exit(dsBadStream);
     end else begin
@@ -1909,7 +2158,7 @@ begin
       hasRef := kind = PART_REF;
       if hasRef and not GetRefs(src, total, refs) then begin d := nil; Exit(dsBadStream); end;
       slen := src.GetVarint(Length(s) - src.p);
-      if not src.ok or (slen < 1) or (s[src.p] = PARTS_STREAM) then Exit(dsBadStream);
+      if not src.ok or (slen < 1) or (s[src.p] <> IMAGE_STREAM) then begin d := nil; Exit(dsBadStream); end;
       if (orig <> nil) and not hasRef then begin
         if total + len > Length(orig^) then Exit(dsBadStream);
         part := Copy(orig^, total, len);
@@ -1940,8 +2189,8 @@ begin
 end;
 
 function DescribeStream(const s: TBytes; maxOut: Int64; out streamVersion: Integer; out parts: TStreamParts): TDecodeStatus;
-var src: TSource; n, k: SizeInt; len, slen, total, from, coded: Int64; kind, m: Integer; refs: TPartRefs;
-  hd: TStreamHead;
+var src: TSource; n, k: SizeInt; len, slen, total, from, coded: Int64; kind, m, lastKind: Integer; refs: TPartRefs;
+  hd: TStreamHead; part: TBytes; cnt, plainTotal: Int64; isImage: Boolean;
 
   function Image(first, l: Int64): TDecodeStatus;
   var p: TStreamPart;
@@ -1958,7 +2207,8 @@ begin
   parts := nil; streamVersion := 0;
   if Length(s) = 0 then Exit(dsEmpty);
   streamVersion := s[0];
-  if s[0] <> PARTS_STREAM then Exit(Image(0, Length(s)));
+  if not (s[0] in [PARTS_STREAM, DEFLATE_PARTS_STREAM]) then Exit(Image(0, Length(s)));
+  if s[0] = DEFLATE_PARTS_STREAM then lastKind := PART_DEFLATE else lastKind := PART_REF;
   src.b := s; src.p := 1; src.ok := True;
   n := src.GetVarint(Length(s));
   if not src.ok or (n < 1) then Exit(dsBadStream);
@@ -1966,9 +2216,21 @@ begin
   for k := 1 to n do begin
     kind := src.Get;
     len := src.GetVarint(High(Int64) shr 1);
-    if not src.ok or (kind > PART_REF) then Exit(dsBadStream);
+    if not src.ok or (kind > lastKind) then Exit(dsBadStream);
     if len > maxOut - total then Exit(dsTooBig);
-    if kind in [PART_COPY, PART_BYTES] then begin
+    if kind = PART_DEFLATE then begin
+      Result := DecodeDeflate(src, len, False, 1, part, cnt, plainTotal, hd, isImage, coded);
+      if Result <> dsOk then Exit;
+      SetLength(parts, Length(parts) + 1);
+      parts[High(parts)] := Default(TStreamPart);
+      parts[High(parts)].kind := kind; parts[High(parts)].len := len;
+      parts[High(parts)].streams := cnt; parts[High(parts)].inflated := plainTotal;
+      parts[High(parts)].streamLen := coded;
+      parts[High(parts)].L.Clear;
+      if isImage then begin
+        parts[High(parts)].L := hd.L; parts[High(parts)].mode := hd.mode; parts[High(parts)].bands := hd.bands;
+      end;
+    end else if kind in [PART_COPY, PART_BYTES] then begin
       SetLength(parts, Length(parts) + 1);
       parts[High(parts)] := Default(TStreamPart);
       parts[High(parts)].kind := kind; parts[High(parts)].len := len;
@@ -1990,7 +2252,7 @@ begin
     end else begin
       if (kind = PART_REF) and not GetRefs(src, total, refs) then Exit(dsBadStream);
       slen := src.GetVarint(Length(s) - src.p);
-      if not src.ok or (slen < 1) or (s[src.p] = PARTS_STREAM) then Exit(dsBadStream);
+      if not src.ok or (slen < 1) or (s[src.p] <> IMAGE_STREAM) then Exit(dsBadStream);
       Result := Image(src.p, slen);
       if Result <> dsOk then Exit;
       parts[High(parts)].kind := kind;
@@ -2014,7 +2276,7 @@ end;
 function EncodeParts(const d: TBytes; const parts: TParts; out s: TBytes; out why: string; threads: Integer): Boolean;
 var
   o: TSink; k, j, n, images, m: Integer; img, back: TBytes; w: string;
-  subs: array of TBytes; first, len, copyFrom: array of Int64;
+  subs, defl: array of TBytes; first, len, copyFrom: array of Int64; anyDeflate: Boolean;
   hashes: array of QWord; h: QWord; q: Int64; refOf: array of Integer; Rp: TRefPlanes;
 begin
   { the same bytes as an earlier part (a hash of each, then the bytes
@@ -2030,12 +2292,13 @@ begin
   end;
   { each image coded; one whose stream is not smaller than it (a mipmap of
     a few pixels) becomes bytes, and bytes next to bytes are one part }
-  subs := nil; first := nil; len := nil; copyFrom := nil; n := 0;
+  subs := nil; first := nil; len := nil; copyFrom := nil; n := 0; defl := nil; anyDeflate := False;
   SetLength(subs, Length(parts)); SetLength(first, Length(parts)); SetLength(len, Length(parts));
+  SetLength(defl, Length(parts));
   SetLength(copyFrom, Length(parts));
   refOf := nil; SetLength(refOf, Length(parts));
   for k := 0 to High(parts) do begin
-    subs[n] := nil; copyFrom[n] := -1; refOf[n] := -1;
+    subs[n] := nil; copyFrom[n] := -1; refOf[n] := -1; defl[n] := nil;
     if parts[k].len >= MIN_COPY then
       for m := 0 to k - 1 do
         if (hashes[m] = hashes[k]) and (parts[m].len = parts[k].len)
@@ -2045,6 +2308,11 @@ begin
     if copyFrom[n] >= 0 then begin
       first[n] := parts[k].first; len[n] := parts[k].len; Inc(n); Continue;
     end;
+    { deflate streams: a part of their own, or bytes }
+    if (parts[k].kind = pkDeflate) and EncodeDeflate(d, parts[k], threads, defl[n]) then begin
+      first[n] := parts[k].first; len[n] := parts[k].len; Inc(n); anyDeflate := True; Continue;
+    end;
+    defl[n] := nil;
     if parts[k].kind = pkImage then begin
       img := Copy(d, parts[k].first, parts[k].len);
       { against its references (they lie before it), or on its own }
@@ -2054,15 +2322,21 @@ begin
       else if not EncodeImage(img, parts[k].L, subs[n], w, threads) or (Length(subs[n]) >= parts[k].len) then
         subs[n] := nil;
     end;
-    if (subs[n] = nil) and (n > 0) and (subs[n - 1] = nil) and (copyFrom[n - 1] < 0) then Inc(len[n - 1], parts[k].len)
+    if (subs[n] = nil) and (n > 0) and (subs[n - 1] = nil) and (copyFrom[n - 1] < 0) and (defl[n - 1] = nil) then
+      Inc(len[n - 1], parts[k].len)
     else begin first[n] := parts[k].first; len[n] := parts[k].len; Inc(n); end;
   end;
   images := 0;
   o.Init;
-  o.Put(PARTS_STREAM);
+  if anyDeflate then o.Put(DEFLATE_PARTS_STREAM) else o.Put(PARTS_STREAM);
   o.PutVarint(n);
   for j := 0 to n - 1 do
-    if copyFrom[j] >= 0 then begin
+    if defl[j] <> nil then begin
+      o.Put(PART_DEFLATE);
+      o.PutVarint(len[j]);
+      o.PutBytes(defl[j], 0, Length(defl[j]));
+      Inc(images);
+    end else if copyFrom[j] >= 0 then begin
       o.Put(PART_COPY);
       o.PutVarint(len[j]);
       o.PutVarint(copyFrom[j]);
@@ -2118,7 +2392,7 @@ end;
 
 function DecodeFile(const s: TBytes; maxOut: Int64; out d: TBytes; threads: Integer): TDecodeStatus;
 begin
-  if (Length(s) > 0) and (s[0] = PARTS_STREAM) then Exit(DecodeParts(s, maxOut, d, threads));
+  if (Length(s) > 0) and (s[0] in [PARTS_STREAM, DEFLATE_PARTS_STREAM]) then Exit(DecodeParts(s, maxOut, d, threads));
   Result := DecodeImage(s, maxOut, d, threads, nil);
 end;
 

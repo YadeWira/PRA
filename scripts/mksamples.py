@@ -6,7 +6,7 @@ Radiance's fwritecolrs and stb_image_write do it.
 
     python3 scripts/mksamples.py tests
 """
-import os, struct, sys
+import os, struct, sys, zlib
 
 root = sys.argv[1]
 out = os.path.join(root, 'pnm')
@@ -773,17 +773,30 @@ def tiff(name, be, entries_fn, big=False):
 def rgb_rows(w, h, two=False):
     return [b''.join((struct.pack('>H', smooth(x, y, c, 65535)) if two else bytes([smooth(x, y, c, 255)])) for x in range(w) for c in range(3)) for y in range(h)]
 
-def tiff_strips(w, h, rps, rowfn, spp, bps, comp=1, planar=1, gap=0, be=False):
+# TIFF's horizontal predictor (Predictor 2) on a row of samples of bps bits
+def tiff_pred(row, spp, bps, be):
+    if bps == 8:
+        return bytes(row[i] if i < spp else (row[i] - row[i - spp]) % 256 for i in range(len(row)))
+    e = '>' if be else '<'
+    v = struct.unpack(e + 'H' * (len(row) // 2), row)
+    return struct.pack(e + 'H' * len(v), *(v[i] if i < spp else (v[i] - v[i - spp]) % 65536 for i in range(len(v))))
+
+def tiff_strips(w, h, rps, rowfn, spp, bps, comp=1, planar=1, gap=0, be=False, pred=1, level=6, extra=b''):
     def fn():
         data = bytearray(); offs = []; cnts = []
         planes = spp if planar == 2 else 1
         for p in range(planes):
             for s in range(0, h, rps):
-                rows = b''.join(rowfn(y, p) for y in range(s, min(h, s + rps)))
+                rws = [rowfn(y, p) for y in range(s, min(h, s + rps))]
+                if pred == 2: rws = [tiff_pred(r, 1 if planar == 2 else spp, bps, be) for r in rws]
+                rows = b''.join(rws)
+                if s + rps >= h: rows += extra
                 if comp == 32773: rows = packbits(rows, len(rowfn(0, p)))
+                if comp in (8, 32946): rows = zlib.compress(rows, level)
                 offs.append(16 + len(data)); cnts.append(len(rows)); data += rows + bytes(gap)
         ents = [(256, 3, [w]), (257, 3, [h]), (258, 3, [bps] * spp), (259, 3, [comp]), (262, 3, [2 if spp >= 3 else 1]),
                 (273, 4, offs), (277, 3, [spp]), (278, 3, [rps]), (279, 4, cnts), (284, 3, [planar])]
+        if pred != 1: ents.append((317, 3, [pred]))
         return bytes(data), ents
     return fn
 
@@ -811,6 +824,22 @@ def tiles():
     return bytes(data), ents
 tiff('tiff_tiles.tif', False, tiles)
 tiff('tiff_big.tif', False, tiff_strips(19, 11, 11, lambda y, p: rgb_rows(19, 11)[y], 3, 8), big=True)
+# Deflate (zlib's streams): strips with the predictor, 8 and 16 bits; tiles;
+# a last strip with more than its rows; samples PRA does not code (12 bits)
+tiff('tiff_deflate_pred.tif', False, tiff_strips(w, h, 5, lambda y, p: rr[y], 3, 8, comp=8, pred=2))
+tiff('tiff_deflate16_mm.tif', True, tiff_strips(21, 13, 4, lambda y, p: rr16[y], 3, 16, be=True, comp=32946, pred=2, level=9))
+def tiles_deflate():
+    tw = th = 16; W, H = 40, 24; data = bytearray(); offs = []; cnts = []
+    for ty in range(0, H, th):
+        for tx in range(0, W, tw):
+            t = zlib.compress(b''.join(bytes(smooth(tx + x, ty + y, 0, 255) for x in range(tw)) for y in range(th)), 1)
+            offs.append(16 + len(data)); cnts.append(len(t)); data += t
+    ents = [(256, 3, [W]), (257, 3, [H]), (258, 3, [8]), (259, 3, [8]), (262, 3, [1]), (277, 3, [1]),
+            (322, 3, [tw]), (323, 3, [th]), (324, 4, offs), (325, 4, cnts)]
+    return bytes(data), ents
+tiff('tiff_deflate_tiles.tif', False, tiles_deflate)
+tiff('tiff_deflate_extra.tif', False, tiff_strips(53, 31, 8, lambda y, p: gray[y], 1, 8, comp=8, extra=bytes(53 * 3)))
+tiff('tiff_deflate_12bit.tif', False, tiff_strips(64, 48, 16, lambda y, p: bytes(smooth(x, y, 0, 255) // 32 for x in range(96)), 1, 12, comp=8, level=1))
 
 # PSD: a raw composite; a layered one, RLE channels, a mask, an RLE composite
 def psd(name, w, h, ch, layers, rle):

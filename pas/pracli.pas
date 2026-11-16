@@ -937,7 +937,7 @@ end;
 { a stream of several images }
 function KindNote(const p: TPra): string;
 begin
-  if not p.stored and (Length(p.payload) > 0) and (p.payload[0] = PARTS_STREAM) then Result := ', parts'
+  if not p.stored and (Length(p.payload) > 0) and (p.payload[0] in [PARTS_STREAM, DEFLATE_PARTS_STREAM]) then Result := ', parts'
   else Result := '';
 end;
 

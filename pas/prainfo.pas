@@ -352,7 +352,7 @@ begin
   if p.stored then Exit('none (stored as is)');
   if Length(p.payload) = 0 then Exit;
   Result := 'version ' + IntToStr(p.payload[0]);
-  if p.payload[0] = PARTS_STREAM then Result := Result + ' (parts)';
+  if p.payload[0] in [PARTS_STREAM, DEFLATE_PARTS_STREAM] then Result := Result + ' (parts)';
 end;
 
 { the stream's version, 0 when it has none (stored as is) }

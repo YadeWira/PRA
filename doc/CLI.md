@@ -129,10 +129,11 @@ temporary folder and is deleted: nothing is written beside the inputs. A
 
 ### `pra selftest`
 
-The binary carries nine small samples, one for each way the codec takes an
+The binary carries ten small samples, one for each way the codec takes an
 image (16-bit gray samples, RGB, 1 bit, palette indices, BMP RLE8 as a
 side coding, Radiance's scanlines, floats, a file of several images, a PSD
-whose composite goes against its layer: `pas/praselftest.inc`, written by
+whose composite goes against its layer, a TIFF of Deflate strips rebuilt
+bit for bit: `pas/praselftest.inc`, written by
 `tools/gen_selftest.py` from `tests/`), and the `.pra` each one has to
 give. On every SIMD path the processor has, with one thread and with two,
 each is compressed, compared byte for byte with its expected `.pra` (whose

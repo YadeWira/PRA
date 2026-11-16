@@ -1,0 +1,103 @@
+PPA
+Copyright (c) 2026 Yade Bravo (YadeWira)
+Licensed under the MIT License (see LICENSE).
+
+Third-party work
+----------------
+
+vendor/pja is PJA 0.9.8 (https://github.com/YadeWira/PJA, MIT, the same
+author), unmodified, for the JPEG inside a JNG; vendor/pja/NOTICE has its own
+third-party notes (IJG for arithmetic-coded JPEG, CharLS for JPEG-LS).
+pas/ppablake3.pas and pas/ppacpu.pas are PJA's pjablake3 and pjacpu under
+other names.
+
+pas/ppazlib.pas is a port to FreePascal of the parts of zlib 1.3's
+deflate.c and trees.c that decide deflate's choices (hash chains,
+longest_match, deflate_fast, deflate_slow, deflate_rle, deflate_huff, and
+_tr_flush_block with build_tree, gen_bitlen, scan_tree, send_tree and
+build_bl_tree), so that PPA can tell a stream zlib wrote by its parameters;
+and, for the deflate recipes of kind 1 (doc/PREFLATE.md), what deflate()
+does at a flush (Z_SYNC_FLUSH, Z_FULL_FLUSH, Z_PARTIAL_FLUSH, Z_BLOCK),
+fill_window's insertion after one, _tr_align and deflateParams, as zlib
+1.3.1 does them and as zlib 1.2.5 and 1.2.3 did. zlib is (C) 1995-2024
+Jean-loup Gailly and Mark Adler, under the zlib license:
+
+  This software is provided 'as-is', without any express or implied
+  warranty.  In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+     claim that you wrote the original software. If you use this software
+     in a product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+
+PPA's deflate recipes (pas/ppapreflate.pas, pas/ppacorr.pas,
+doc/PREFLATE.md) take the idea of rebuilding a deflate stream from the bytes
+it holds and a small description of its encoder's work, flushes included,
+and (kind 3) of a predictor that follows the stream's own parse and of
+coding a match's distance as its rank among the candidates, from preflate by Dirk
+Steinke (Apache-2.0; studied as 0.3.4, from precomp 0.4.7's
+contrib/preflate). No code of preflate is in PPA; tools/preflate uses a
+preflate binary built outside the repository only as a yardstick.
+
+Kind 3's guesses of a block's code lengths and of their run-length coding
+(pas/ppacorr.pas, "tree builders") reproduce what other encoders do, each
+written in our own code from how that encoder works, to give the same
+lengths:
+  - libdeflate (Eric Biggers, MIT): deflate_make_huffman_code (its sort, its
+    two-queue tree, its length limit) and deflate_compute_precode_items;
+  - miniz (Rich Geldreich and contributors, MIT / Unlicense):
+    tdefl_optimize_huffman_table (with Alistair Moffat and Jyrki
+    Katajainen's in-place code lengths) and tdefl_start_dynamic_block's
+    run-length coding;
+  - zopfli (Copyright 2011 Google Inc., Apache License 2.0): length-limited
+    lengths by package-merge (our own, classic, package-merge), its
+    PatchDistanceCodesForBuggyDecoders, its 8 run-length codings of
+    EncodeTree, and OptimizeHuffmanForRle, whose steps EvenForRle follows
+    one by one (Apache License 2.0: http://www.apache.org/licenses/LICENSE-2.0).
+
+pas/ppaminiz.pas and pas/ppaminizc.c (the deflate recipes of kind 2,
+doc/PREFLATE.md) are a port to FreePascal and C of the parts of miniz's
+tdefl (miniz 1.14 and 3.0.2) that decide its choices: tdefl_compress_normal,
+tdefl_compress_fast, tdefl_find_match and tdefl_flush_block's choice of a
+block's codes, so that PPA can tell a stream miniz wrote by its flags.
+miniz 1.x is in the public domain (Unlicense); miniz 3.x is under the MIT
+license:
+
+  Copyright 2013-2014 RAD Game Tools and Valve Software
+  Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
+
+  All Rights Reserved.
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to
+  the following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+  CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+tools/zpaql/zpaqlc.py, zpaqlvm.py and test_zpaqlc.py are PJA's
+(https://github.com/YadeWira/PJA, MIT, the same author) at its commit
+114c395, unmodified and pinned: the zpaq-std codec's ZPAQL decoder
+(pas/plugin/zpaql/) is compiled with them, and its bytecode must not
+change once a codec is published. pas/plugin/zpaql/model.zl takes its
+arithmetic decoder from PJA's pas/plugin/zpaql/pjadec.zl.
